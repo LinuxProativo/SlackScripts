@@ -33,6 +33,14 @@ if [ -z "$NOVO_USUARIO" ]; then
     exit 1
 fi
 
+# Pergunta interativa para capturar o idioma/locale desejado pelo usuário
+read -p "Enter your system locale/language (e.g., pt_BR.UTF-8): " IDIOMA_SELECIONADO
+
+if [ -z "$IDIOMA_SELECIONADO" ]; then
+    echo "ERROR: Locale cannot be blank! Aborting..."
+    exit 1
+fi
+
 TEMP_CHOSEN=$(mktemp)
 
 dialog --title " Slackware Package Series Selection " \
@@ -77,6 +85,7 @@ echo "Target Disk:        $DISCO"
 echo "UEFI Partition:     $PART_UEFI"
 echo "Root Partition:     $PART_ROOT"
 echo "User to create:     $NOVO_USUARIO"
+echo "System Locale:      $IDIOMA_SELECIONADO"
 echo "Selected Series:    $CATEGORIES"
 echo "============================="
 read -p "EVERYTHING CORRECT? All existing data will be WIPED. Type 'yes' to begin: " CONFIRMA
@@ -162,11 +171,50 @@ chroot /mnt /bin/bash -c "
         echo 'WARNING: /etc/sudoers not found.'
     fi
 
+    echo '=> Configuring keyboard layout in /etc/profile...'
+    if [ -f /etc/profile ]; then
+        echo '' >> /etc/profile
+        echo 'setxkbmap -model abnt2 -layout br' >> /etc/profile
+    fi
+
+    echo '=> Configuring window manager interface (xwmconfig)...'
+    xwmconfig
+
+    echo '=> Updating initdefault runlevel to 4 in /etc/inittab...'
+    if [ -f /etc/inittab ]; then
+        sed -i 's/id:3:initdefault:/id:4:initdefault:/' /etc/inittab
+    fi
+
+    echo '=> Replacing system PATH inside /etc/profile...'
+    if [ -f /etc/profile ]; then
+        sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
+    fi
+
+    echo '=> Applying system language choice ($IDIOMA_SELECIONADO)...'
+    if [ -f /etc/profile.d/lang.sh ]; then
+        sed -i 's/export LANG=.*/export LANG=$IDIOMA_SELECIONADO/' /etc/profile.d/lang.sh
+    fi
+    if [ -f /etc/profile.d/lang.csh ]; then
+        sed -i 's/setenv LANG.*/setenv LANG $IDIOMA_SELECIONADO/' /etc/profile.d/lang.csh
+    fi
+
+    echo '=> Enabling and configuring precision NTP time service...'
+    chmod +x /etc/rc.d/rc.ntpd
+    if [ -f /etc/ntp.conf ]; then
+        sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
+    fi
+
     echo '=> Configuring Network Layout (netconfig)...'
     netconfig
 
     echo '=> Configuring Timezone (timeconfig)...'
     timeconfig
+
+    echo '=> Synchronizing system clock with NTP and active hardware time...'
+    ntpdate gps.ntp.br || echo 'ntpdate failed, moving forward.'
+    hwclock --systohc --localtime
+    sh /etc/rc.d/rc.ntpd start
+    date
 
     echo '=> Updating CA Certificates...'
     update-ca-certificates --fresh 1

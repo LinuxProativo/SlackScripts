@@ -46,4 +46,4 @@ chmod +x btrfs-uefi
 
 ## 📝 Lista de Scripts Disponíveis
 
-*   `btrfs-uefi` - Automatiza o particionamento em NVMe, GPT, UEFI, formatação em Btrfs com subvolumes `@` e `@home`, além de gerar o `fstab` otimizado antes do `setup`.
+*   `btrfs-uefi` - Automatiza o particionamento em NVMe, GPT, UEFI, formatação em Btrfs com subvolumes `@` e `@home`, além de gerar o `fstab` otimizado.
