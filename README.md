@@ -34,16 +34,16 @@ use a URL do arquivo no modo **Raw**.
 
 **Estrutura do comando:**
 ```bash
-wget https://raw.githubusercontent.com/LinuxProativo/SlackScripts/refs/heads/main/[Script-Desejado]
+wget https://raw.githubusercontent.com/LinuxProativo/SlackScripts/master/<SCRIPT>
 ```
 
 **Exemplo prático de execução:**
 ```bash
-wget https://raw.githubusercontent.com/LinuxProativo/SlackScripts/refs/heads/main/[Script-Desejado]
-chmod +x pre-install.sh
-./pre-install.sh
+wget https://raw.githubusercontent.com/LinuxProativo/SlackScripts/master/btrfs-uefi
+chmod +x btrfs-uefi
+./btrfs-uefi
 ```
 
 ## 📝 Lista de Scripts Disponíveis
 
-*   `pre-install.sh` - Automatiza o particionamento em NVMe, GPT, UEFI, formatação em Btrfs com subvolumes `@` e `@home`, além de gerar o `fstab` otimizado antes do `setup`.
+*   `btrfs-uefi` - Automatiza o particionamento em NVMe, GPT, UEFI, formatação em Btrfs com subvolumes `@` e `@home`, além de gerar o `fstab` otimizado antes do `setup`.
