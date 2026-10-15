@@ -1,0 +1,58 @@
+#!/bin/bash
+# ==============================================================================
+# SCRIPT DE PRÉ-CONFIGURAÇÃO DO SLACKWARE 16 (BTRFS + TIMESHIFT + NVME + UEFI)
+# ==============================================================================
+set -e
+
+DISCO="/dev/nvme0n1"
+PART_UEFI="${DISCO}p1"
+PART_ROOT="${DISCO}p2"
+
+echo "=== [1/5] Iniciando Particionamento GPT no $DISCO ==="
+
+parted -s "$DISCO" \
+    mklabel gpt \
+    mkpart "EFI" fat32 1MiB 1025MiB \
+    set 1 esp on \
+    mkpart "Linux" btrfs 1025MiB 100%
+
+echo "=== [2/5] Formatando Partições ==="
+mkfs.fat -F32 -n EFI "$PART_UEFI"
+mkfs.btrfs -f -L ROOT "$PART_ROOT"
+
+echo "=== [3/5] Criando Subvolumes Btrfs (Layout Timeshift: @ e @home) ==="
+mount -t btrfs "$PART_ROOT" /mnt
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
+umount /mnt
+
+echo "=== [4/5] Montando Estrutura para o Instalador do Slackware ==="
+
+OPTS="noatime,compress=zstd:1,space_cache=v2,discard=async"
+
+mount -o "$OPTS,subvol=@" "$PART_ROOT" /mnt
+
+mkdir -p /mnt/home
+mkdir -p /mnt/boot/efi
+mkdir -p /mnt/etc
+
+mount -o "$OPTS,subvol=@home" "$PART_ROOT" /mnt/home
+mount "$PART_UEFI" /mnt/boot/efi
+
+echo "=== [5/5] Gerando o fstab customizado (/mnt/etc/fstab) ==="
+cat << EOF > /mnt/etc/fstab
+$PART_ROOT      /               btrfs   noatime,compress=zstd:1,space_cache=v2,discard=async,subvol=@     0 0
+$PART_ROOT      /home           btrfs   noatime,compress=zstd:1,space_cache=v2,discard=async,subvol=@home 0 0
+$PART_UEFI      /boot/efi       vfat    defaults                                                          1 0
+tmpfs           /tmp            tmpfs   noatime,nodev,nosuid,mode=1777                               0 0
+tmpfs           /var/tmp        tmpfs   noatime,nodev,nosuid,mode=1777                               0 0
+tmpfs           /dev/shm        tmpfs   nosuid,nodev,noexec                                          0 0
+devpts          /dev/pts        devpts  gid=5,mode=620                                               0 0
+proc            /proc           proc    defaults                                                     0 0
+EOF
+
+echo "=============================================================================="
+echo " TUDO PRONTO! O disco foi preparado com sucesso."
+echo " Agora, digite 'setup' e prossiga DIRETAMENTE para a etapa SOURCE."
+echo " Pule as etapas ADDSWAP e TARGET."
+echo "=============================================================================="
