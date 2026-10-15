@@ -1,35 +1,110 @@
 #!/bin/bash
 # ==============================================================================
-# SCRIPT DE PRÉ-CONFIGURAÇÃO DO SLACKWARE 16 (BTRFS + TIMESHIFT + NVME + UEFI)
+# INTERACTIVE SLACKWARE INSTALLATION SCRIPT (BTRFS + TIMESHIFT + UEFI + CHROOT)
 # ==============================================================================
 set -e
 
-DISCO="/dev/nvme0n1"
-PART_UEFI="${DISCO}p1"
-PART_ROOT="${DISCO}p2"
+echo "=============================================================================="
+echo "          WELCOME TO THE SLACKWARE INTERACTIVE BTRFS INSTALLER                "
+echo "=============================================================================="
+echo ""
 
-echo "=== [1/5] Iniciando Particionamento GPT no $DISCO ==="
+if [ -z "$1" ]; then
+    echo "ERROR: Missing disk parameter!"
+    echo "Usage: $0 <DISK_DEVICE>"
+    echo "Example: $0 /dev/nvme0n1"
+    echo "         $0 /dev/sda"
+    echo "=============================================================================="
+    exit 1
+fi
 
+DISCO="$1"
+
+if [ ! -b "$DISCO" ]; then
+    echo "CRITICAL ERROR: Device '$DISCO' is not a valid block device or does not exist."
+    echo "Aborting installation immediately."
+    exit 1
+fi
+
+read -p "Enter the name of the new standard user (e.g., slackuser): " NOVO_USUARIO
+
+if [ -z "$NOVO_USUARIO" ]; then
+    echo "ERROR: Username cannot be blank! Aborting..."
+    exit 1
+fi
+
+TEMP_CHOSEN=$(mktemp)
+
+dialog --title " Slackware Package Series Selection " \
+       --checklist "Select the package categories you want to install:\n(Use SPACEBAR to select/deselect, ENTER to confirm)" 22 70 15 \
+       "a"    "Base Linux system" ON \
+       "ap"   "Applications that don't require X" ON \
+       "d"    "Development tools (compilers, etc.)" ON \
+       "e"    "GNU Emacs" OFF \
+       "f"    "FAQ lists, HOWTOs, and documentation" OFF \
+       "k"    "Linux kernel source" ON \
+       "kde"  "KDE Plasma Desktop Environment" ON \
+       "l"    "System libraries" ON \
+       "n"    "Networking applications and daemons" ON \
+       "t"    "TeX typesetting system" OFF \
+       "tcl"  "Tcl/Tk script languages" ON \
+       "x"    "X Window System (base graphics)" ON \
+       "xap"  "X applications (GIMP, Firefox, etc.)" ON \
+       "xfce" "XFCE Desktop Environment" OFF \
+       "y"    "Games" ON 2> "$TEMP_CHOSEN"
+
+CATEGORIES=$(cat "$TEMP_CHOSEN" | tr -d '"')
+rm -f "$TEMP_CHOSEN"
+
+clear
+
+if [ -z "$CATEGORIES" ]; then
+    echo "ERROR: No package categories selected! Aborting..."
+    exit 1
+fi
+
+if [[ "$DISCO" == *"nvme"* ]] || [[ "$DISCO" == *"mmcblk"* ]]; then
+    PART_UEFI="${DISCO}p1"
+    PART_ROOT="${DISCO}p2"
+else
+    PART_UEFI="${DISCO}1"
+    PART_ROOT="${DISCO}2"
+fi
+
+echo ""
+echo "=== CURRENT CONFIGURATION ==="
+echo "Target Disk:        $DISCO"
+echo "UEFI Partition:     $PART_UEFI"
+echo "Root Partition:     $PART_ROOT"
+echo "User to create:     $NOVO_USUARIO"
+echo "Selected Series:    $CATEGORIES"
+echo "============================="
+read -p "EVERYTHING CORRECT? All existing data will be WIPED. Type 'yes' to begin: " CONFIRMA
+
+if [ "$CONFIRMA" != "yes" ]; then
+    echo "Installation cancelled by user."
+    exit 1
+fi
+
+echo "=== [1/7] Initializing GPT Partition Scheme on $DISCO ==="
 parted -s "$DISCO" \
     mklabel gpt \
     mkpart "EFI" fat32 1MiB 1025MiB \
     set 1 esp on \
     mkpart "Linux" btrfs 1025MiB 100%
 
-echo "=== [2/5] Formatando Partições ==="
+echo "=== [2/7] Formatting Partitions ==="
 mkfs.fat -F32 -n EFI "$PART_UEFI"
 mkfs.btrfs -f -L ROOT "$PART_ROOT"
 
-echo "=== [3/5] Criando Subvolumes Btrfs (Layout Timeshift: @ e @home) ==="
+echo "=== [3/7] Creating Btrfs Subvolumes (Timeshift Layout: @ and @home) ==="
 mount -t btrfs "$PART_ROOT" /mnt
 btrfs subvolume create /mnt/@
 btrfs subvolume create /mnt/@home
 umount /mnt
 
-echo "=== [4/5] Montando Estrutura para o Instalador do Slackware ==="
-
+echo "=== [4/7] Mounting Directory Structure and Injecting Packages ==="
 OPTS="noatime,compress=zstd:1,space_cache=v2,discard=async"
-
 mount -o "$OPTS,subvol=@" "$PART_ROOT" /mnt
 
 mkdir -p /mnt/home
@@ -39,7 +114,18 @@ mkdir -p /mnt/etc
 mount -o "$OPTS,subvol=@home" "$PART_ROOT" /mnt/home
 mount "$PART_UEFI" /mnt/boot/efi
 
-echo "=== [5/5] Gerando o fstab customizado (/mnt/etc/fstab) ==="
+mkdir -p /cdrom
+mount /dev/cdrom /cdrom || echo "Media already mounted or using an alternative mount point."
+
+echo "=> Installing Slackware packages for selected series..."
+for pkg in $CATEGORIES; do
+    echo "--> Installing series: [$pkg] <--"
+    installpkg --terse --root /mnt /cdrom/slackware64/$pkg/*.txz
+done
+
+umount /cdrom
+
+echo "=== [5/7] Generating Customized fstab (/mnt/etc/fstab) ==="
 cat << EOF > /mnt/etc/fstab
 $PART_ROOT      /               btrfs   noatime,compress=zstd:1,space_cache=v2,discard=async,subvol=@     0 0
 $PART_ROOT      /home           btrfs   noatime,compress=zstd:1,space_cache=v2,discard=async,subvol=@home 0 0
@@ -51,8 +137,53 @@ devpts          /dev/pts        devpts  gid=5,mode=620                          
 proc            /proc           proc    defaults                                                     0 0
 EOF
 
-echo "=============================================================================="
-echo " TUDO PRONTO! O disco foi preparado com sucesso."
-echo " Agora, digite 'setup' e prossiga DIRETAMENTE para a etapa SOURCE."
-echo " Pule as etapas ADDSWAP e TARGET."
-echo "=============================================================================="
+echo "=== [6/7] Preparing chroot Environment ==="
+mount -t proc /proc /mnt/proc
+mount -o bind /dev /mnt/dev
+mount -o bind /sys /mnt/sys
+cp -L /etc/resolv.conf /mnt/etc/resolv.conf
+
+echo "=== [7/7] Configuring the System Inside chroot ==="
+chroot /mnt /bin/bash -c "
+    source /etc/profile
+
+    echo '=> Configuring Root Password...'
+    passwd
+
+    echo '=> Creating standard user and configuring Sudo...'
+    useradd -m -g users -G wheel,audio,video,plugdev,power,lp,scanner -s /bin/bash '$NOVO_USUARIO'
+
+    echo 'Set the password for user $NOVO_USUARIO:'
+    passwd '$NOVO_USUARIO'
+
+    if [ -f /etc/sudoers ]; then
+        sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+    else
+        echo 'WARNING: /etc/sudoers not found.'
+    fi
+
+    echo '=> Configuring Network Layout (netconfig)...'
+    netconfig
+
+    echo '=> Configuring Timezone (timeconfig)...'
+    timeconfig
+
+    echo '=> Updating CA Certificates...'
+    update-ca-certificates --fresh 1
+
+    echo '=> Installing and Configuring GRUB...'
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=grub
+    grub-mkconfig -o /boot/grub/grub.cfg
+"
+
+echo "=== [FINISHED] Unmounting volumes and rebooting system ==="
+umount /mnt/boot/efi
+umount /mnt/home
+umount /mnt/sys
+umount /mnt/dev
+umount /mnt/proc
+umount /mnt
+
+echo "Rebooting in 5 seconds..."
+sleep 5
+reboot
