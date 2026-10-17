@@ -401,6 +401,7 @@ mount -t proc /proc /mnt/proc
 mount -o bind /dev /mnt/dev
 mount -o bind /sys /mnt/sys
 mount -o bind /run /mnt/run 2>/dev/null || true
+mount -o bind /sys/firmware/efi/efivars /mnt/sys/firmware/efi/efivars 2>/dev/null || true
 cp -L /etc/resolv.conf /mnt/etc/resolv.conf
 
 chroot /mnt /bin/bash -c "
@@ -487,14 +488,8 @@ EOF_CSH
     echo 'Updating CA Certificates...'
     update-ca-certificates --fresh 1
 
-    echo '=> Configuring Kernel: Forcing kernel-huge exclusively...'
-    HUGE_KERNEL=$(ls -1 /boot/vmlinuz-huge-* 2>/dev/null | head -n 1)
-    if [ -n \"$HUGE_KERNEL\" ]; then
-        ln -sf \"$(basename \"$HUGE_KERNEL\")\" /boot/vmlinuz
-    fi
-
     echo 'Installing and configuring GRUB UEFI...'
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=Slackware --recheck
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=Slackware --recheck --removable
     grub-mkconfig -o /boot/grub/grub.cfg
 "
 
