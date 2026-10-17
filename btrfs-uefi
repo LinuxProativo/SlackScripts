@@ -1,48 +1,128 @@
 #!/bin/bash
 # ==============================================================================
-# INTERACTIVE SLACKWARE INSTALLATION SCRIPT (BTRFS + TIMESHIFT + UEFI + CHROOT)
+# AUTOMATED INTERACTIVE SLACKWARE INSTALLER (BTRFS + TIMESHIFT + UEFI + GRUB)
 # ==============================================================================
 set -e
 
+test "$(id -u)" -ne 0 && echo "CRITICAL ERROR: This script must be executed as root." && exit 1
+
+clear
 echo "=============================================================================="
-echo "          WELCOME TO THE SLACKWARE INTERACTIVE BTRFS INSTALLER                "
+echo "          SLACKWARE ADVANCED BTRFS + UEFI INTERACTIVE INSTALLER               "
 echo "=============================================================================="
 echo ""
 
-if [ -z "$1" ]; then
-    echo "ERROR: Missing disk parameter!"
-    echo "Usage: $0 <DISK_DEVICE>"
-    echo "Example: $0 /dev/nvme0n1"
-    echo "         $0 /dev/sda"
-    echo "=============================================================================="
-    exit 1
+# ------------------------------------------------------------------------------
+# STEP 1: PARTITIONING MODE (WHOLE DISK vs MANUAL SELECTION)
+# ------------------------------------------------------------------------------
+echo "--- [Step 1: Partitioning Mode] ---"
+echo "1) Automatic: Wipe and partition entire disk (GPT + EFI + Root + optional Swap)"
+echo "2) Manual: Select existing EFI and Root partitions"
+read -p "Select partitioning method [1/2]: " PART_MODE
+
+case "$PART_MODE" in
+    1)
+        PART_TYPE="AUTO"
+        lsblk -d -e 7,11 -o NAME,SIZE,MODEL
+        echo ""
+        read -p "Enter target disk device (e.g., /dev/sda, /dev/nvme0n1): " DISCO
+        test ! -b "$DISCO" && echo "ERROR: Device '$DISCO' is not a valid block device." && exit 1
+        ;;
+    2)
+        PART_TYPE="MANUAL"
+        lsblk -e 7,11 -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT
+        echo ""
+        read -p "Enter EFI System Partition (e.g., /dev/sda1, /dev/nvme0n1p1): " PART_UEFI
+        read -p "Enter Root Btrfs Partition (e.g., /dev/sda2, /dev/nvme0n1p2): " PART_ROOT
+        test ! -b "$PART_UEFI" -o ! -b "$PART_ROOT" && echo "ERROR: One or more selected partitions do not exist." && exit 1
+        ;;
+    *)
+        echo "Invalid selection. Aborting." && exit 1
+        ;;
+esac
+
+# ------------------------------------------------------------------------------
+# STEP 2: SWAP CONFIGURATION
+# ------------------------------------------------------------------------------
+echo ""
+echo "--- [Step 2: Swap Configuration] ---"
+echo "1) No Swap"
+echo "2) Swap Partition"
+echo "3) Swapfile (on dedicated non-CoW Btrfs subvolume)"
+read -p "Select swap mode [1/2/3] [Default: 1]: " SWAP_CHOICE
+
+MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+RAM_GB=$(( MEM_KB / 1024 / 1024 ))
+test "$RAM_GB" -lt 1 && RAM_GB=1
+
+DEFAULT_SWAP=$RAM_GB
+test "$RAM_GB" -gt 8 && DEFAULT_SWAP=8
+
+SWAP_SIZE_GB=0
+PART_SWAP=""
+
+case "$SWAP_CHOICE" in
+    2)
+        SWAP_TYPE="PARTITION"
+        if [ "$PART_TYPE" = "AUTO" ]; then
+            read -p "Enter swap partition size in GiB [Default: ${DEFAULT_SWAP}G]: " USER_SWAP_INPUT
+            if [[ "$USER_SWAP_INPUT" =~ ^[0-9]+$ ]] && [ "$USER_SWAP_INPUT" -gt 0 ]; then
+                SWAP_SIZE_GB="$USER_SWAP_INPUT"
+            else
+                echo "=> No custom size specified. Using default: ${DEFAULT_SWAP} GiB"
+                SWAP_SIZE_GB="$DEFAULT_SWAP"
+            fi
+        else
+            read -p "Enter existing Swap partition (e.g., /dev/sda3): " PART_SWAP
+            test ! -b "$PART_SWAP" && echo "ERROR: Swap partition '$PART_SWAP' does not exist." && exit 1
+        fi
+        ;;
+    3)
+        SWAP_TYPE="SWAPFILE"
+        read -p "Enter swapfile size in GiB [Default: ${DEFAULT_SWAP}G]: " USER_SWAP_INPUT
+        if [[ "$USER_SWAP_INPUT" =~ ^[0-9]+$ ]] && [ "$USER_SWAP_INPUT" -gt 0 ]; then
+            SWAP_SIZE_GB="$USER_SWAP_INPUT"
+        else
+            echo "=> No custom size specified. Using default: ${DEFAULT_SWAP} GiB"
+            SWAP_SIZE_GB="$DEFAULT_SWAP"
+        fi
+        ;;
+    1|*)
+        SWAP_TYPE="NONE"
+        echo "=> No swap will be configured."
+        ;;
+esac
+
+# ------------------------------------------------------------------------------
+# STEP 3: BTRFS SUBVOLUMES CONFIGURATION
+# ------------------------------------------------------------------------------
+TEMP_SUBVOLS=$(mktemp)
+dialog --title " Btrfs Subvolume Configuration " \
+       --checklist "Select optional subvolumes to create alongside '@':\n('@' is root and mandatory. '@home' is Timeshift standard)" 16 65 6 \
+       "@home" "User personal directories (/home)" ON \
+       "@opt"  "Third-party software (/opt)" OFF \
+       "@srv"  "Server data (/srv)" OFF \
+       "@tmp"  "Temporary storage directory (/tmp)" OFF \
+       "@var"  "Variable data directory (/var)" OFF 2> "$TEMP_SUBVOLS"
+
+CHOSEN_SUBVOLS=$(cat "$TEMP_SUBVOLS" | tr -d '"')
+rm -f "$TEMP_SUBVOLS"
+
+# ------------------------------------------------------------------------------
+# STEP 4: RAM DISKS (TMPFS) CONFIGURATION
+# ------------------------------------------------------------------------------
+read -p "Do you want to mount /tmp and /var/tmp as tmpfs in RAM? [y/N]: " TMPFS_ANSWER
+if [[ "$TMPFS_ANSWER" =~ ^[Yy]$ ]]; then
+    USE_TMPFS="YES"
+    CHOSEN_SUBVOLS=$(echo "$CHOSEN_SUBVOLS" | sed 's/@tmp//g')
+else
+    USE_TMPFS="NO"
 fi
 
-DISCO="$1"
-
-if [ ! -b "$DISCO" ]; then
-    echo "CRITICAL ERROR: Device '$DISCO' is not a valid block device or does not exist."
-    echo "Aborting installation immediately."
-    exit 1
-fi
-
-read -p "Enter the name of the new standard user (e.g., slackuser): " NOVO_USUARIO
-
-if [ -z "$NOVO_USUARIO" ]; then
-    echo "ERROR: Username cannot be blank! Aborting..."
-    exit 1
-fi
-
-# Pergunta interativa para capturar o idioma/locale desejado pelo usuário
-read -p "Enter your system locale/language (e.g., pt_BR.UTF-8): " IDIOMA_SELECIONADO
-
-if [ -z "$IDIOMA_SELECIONADO" ]; then
-    echo "ERROR: Locale cannot be blank! Aborting..."
-    exit 1
-fi
-
+# ------------------------------------------------------------------------------
+# STEP 5: SLACKWARE PACKAGE SERIES SELECTION
+# ------------------------------------------------------------------------------
 TEMP_CHOSEN=$(mktemp)
-
 dialog --title " Slackware Package Series Selection " \
        --checklist "Select the package categories you want to install:\n(Use SPACEBAR to select/deselect, ENTER to confirm)" 22 70 15 \
        "a"    "Base Linux system" ON \
@@ -64,174 +144,357 @@ dialog --title " Slackware Package Series Selection " \
 CATEGORIES=$(cat "$TEMP_CHOSEN" | tr -d '"')
 rm -f "$TEMP_CHOSEN"
 
+test -z "$CATEGORIES" && echo "ERROR: No package categories selected! Aborting." && exit 1
+
+# ------------------------------------------------------------------------------
+# STEP 6: LOCALE & LANGUAGE SELECTION
+# ------------------------------------------------------------------------------
+TEMP_LOCALE=$(mktemp)
+dialog --title " System Locale Selection " \
+       --menu "Choose primary system language (configures LANG, LANGUAGE, and all LC_* categories):" 16 70 7 \
+       "en_US.UTF-8" "English (United States)" \
+       "pt_BR.UTF-8" "Portuguese (Brazil)" \
+       "es_ES.UTF-8" "Spanish (Spain)" \
+       "de_DE.UTF-8" "German (Germany)" \
+       "fr_FR.UTF-8" "French (France)" \
+       "it_IT.UTF-8" "Italian (Italy)" \
+       "DEFAULT"     "Keep Slackware defaults (Do not modify)" 2> "$TEMP_LOCALE"
+
+IDIOMA_SELECIONADO=$(cat "$TEMP_LOCALE")
+rm -f "$TEMP_LOCALE"
 clear
 
-if [ -z "$CATEGORIES" ]; then
-    echo "ERROR: No package categories selected! Aborting..."
-    exit 1
-fi
+case "$IDIOMA_SELECIONADO" in
+    pt_BR.UTF-8) IDIOMA_LANGUAGE="pt_BR:pt" ;;
+    en_US.UTF-8) IDIOMA_LANGUAGE="en_US:en" ;;
+    es_ES.UTF-8) IDIOMA_LANGUAGE="es_ES:es" ;;
+    de_DE.UTF-8) IDIOMA_LANGUAGE="de_DE:de" ;;
+    fr_FR.UTF-8) IDIOMA_LANGUAGE="fr_FR:fr" ;;
+    it_IT.UTF-8) IDIOMA_LANGUAGE="it_IT:it" ;;
+    *)           IDIOMA_LANGUAGE="" ;;
+esac
 
-if [[ "$DISCO" == *"nvme"* ]] || [[ "$DISCO" == *"mmcblk"* ]]; then
-    PART_UEFI="${DISCO}p1"
-    PART_ROOT="${DISCO}p2"
-else
-    PART_UEFI="${DISCO}1"
-    PART_ROOT="${DISCO}2"
-fi
+# ------------------------------------------------------------------------------
+# STEP 7: USER CONFIGURATION
+# ------------------------------------------------------------------------------
+read -p "Enter standard user name [Default: slackuser]: " NOVO_USUARIO
+test -z "$NOVO_USUARIO" && NOVO_USUARIO="slackuser"
 
-echo ""
-echo "=== CURRENT CONFIGURATION ==="
-echo "Target Disk:        $DISCO"
-echo "UEFI Partition:     $PART_UEFI"
+# ------------------------------------------------------------------------------
+# SUMMARY & CONFIRMATION
+# ------------------------------------------------------------------------------
+clear
+echo "=============================================================================="
+echo "                         INSTALLATION SUMMARY                                 "
+echo "=============================================================================="
+echo "Partition Mode:     $PART_TYPE"
+if [ "$PART_TYPE" = "AUTO" ]; then
+    echo "Target Disk:        $DISCO"
+    if [[ "$DISCO" == *"nvme"* ]] || [[ "$DISCO" == *"mmcblk"* ]]; then
+        PART_UEFI="${DISCO}p1"
+        if [ "$SWAP_TYPE" = "PARTITION" ]; then
+            PART_SWAP="${DISCO}p2"
+            PART_ROOT="${DISCO}p3"
+        else
+            PART_ROOT="${DISCO}p2"
+        fi
+    else
+        PART_UEFI="${DISCO}1"
+        if [ "$SWAP_TYPE" = "PARTITION" ]; then
+            PART_SWAP="${DISCO}2"
+            PART_ROOT="${DISCO}3"
+        else
+            PART_ROOT="${DISCO}2"
+        fi
+    fi
+fi
+echo "EFI Partition:      $PART_UEFI"
 echo "Root Partition:     $PART_ROOT"
-echo "User to create:     $NOVO_USUARIO"
-echo "System Locale:      $IDIOMA_SELECIONADO"
-echo "Selected Series:    $CATEGORIES"
-echo "============================="
-read -p "EVERYTHING CORRECT? All existing data will be WIPED. Type 'yes' to begin: " CONFIRMA
+echo "Swap Type:          $SWAP_TYPE"
+[ "$SWAP_TYPE" = "PARTITION" ] && echo "Swap Partition:     $PART_SWAP"
+[ "$SWAP_TYPE" = "SWAPFILE" ]  && echo "Swapfile Size:      ${SWAP_SIZE_GB} GiB"
+echo "Subvolumes:         @ $CHOSEN_SUBVOLS"
+echo "Mount tmpfs:        $USE_TMPFS"
+echo "Selected Locale:    $IDIOMA_SELECIONADO"
+echo "LANGUAGE string:    $IDIOMA_LANGUAGE"
+echo "LC_COLLATE:         C (Standard Unix collation)"
+echo "Default User:       $NOVO_USUARIO"
+echo "Package Groups:     $CATEGORIES"
+echo "=============================================================================="
+echo "WARNING: ALL DATA ON THE SPECIFIED PARTITIONS/DRIVE WILL BE ERASED!"
+read -p "Are you absolutely sure you want to proceed? Type 'yes' to start: " CONFIRMA
+test "$CONFIRMA" != "yes" && echo "Installation cancelled by user." && exit 1
 
-if [ "$CONFIRMA" != "yes" ]; then
-    echo "Installation cancelled by user."
-    exit 1
+# ------------------------------------------------------------------------------
+# STEP 8: DISK PARTITIONING & FORMATTING EXECUTION
+# ------------------------------------------------------------------------------
+if [ "$PART_TYPE" = "AUTO" ]; then
+    echo "--> [1/7] Partitioning disk $DISCO..."
+    swapoff -a || true
+    umount -q "${DISCO}"* || true
+
+    parted -s "$DISCO" mklabel gpt
+    parted -s "$DISCO" mkpart "EFI" fat32 1MiB 1025MiB
+    parted -s "$DISCO" set 1 esp on
+
+    if [ "$SWAP_TYPE" = "PARTITION" ]; then
+        SWAP_END=$(( 1025 + SWAP_SIZE_GB * 1024 ))
+        parted -s "$DISCO" mkpart "Swap" linux-swap 1025MiB "${SWAP_END}MiB"
+        parted -s "$DISCO" mkpart "Root" btrfs "${SWAP_END}MiB" 100%
+    else
+        parted -s "$DISCO" mkpart "Root" btrfs 1025MiB 100%
+    fi
+
+    udevadm settle || sleep 2
 fi
 
-echo "=== [1/7] Initializing GPT Partition Scheme on $DISCO ==="
-parted -s "$DISCO" \
-    mklabel gpt \
-    mkpart "EFI" fat32 1MiB 1025MiB \
-    set 1 esp on \
-    mkpart "Linux" btrfs 1025MiB 100%
-
-echo "=== [2/7] Formatting Partitions ==="
+echo "--> [2/7] Formatting partitions..."
 mkfs.fat -F32 -n EFI "$PART_UEFI"
 mkfs.btrfs -f -L ROOT "$PART_ROOT"
 
-echo "=== [3/7] Creating Btrfs Subvolumes (Timeshift Layout: @ and @home) ==="
+if [ "$SWAP_TYPE" = "PARTITION" ]; then
+    echo "Formatting Swap partition..."
+    mkswap -L SWAP "$PART_SWAP"
+fi
+
+# ------------------------------------------------------------------------------
+# STEP 9: BTRFS SUBVOLUMES CREATION & MOUNTING
+# ------------------------------------------------------------------------------
+echo "--> [3/7] Setting up Btrfs subvolumes..."
 mount -t btrfs "$PART_ROOT" /mnt
 btrfs subvolume create /mnt/@
-btrfs subvolume create /mnt/@home
+
+for sub in $CHOSEN_SUBVOLS; do
+    btrfs subvolume create "/mnt/$sub"
+done
+
+test "$SWAP_TYPE" = "SWAPFILE" && btrfs subvolume create /mnt/@swap
+
 umount /mnt
 
-echo "=== [4/7] Mounting Directory Structure and Injecting Packages ==="
-OPTS="noatime,compress=zstd:1,space_cache=v2,discard=async"
-mount -o "$OPTS,subvol=@" "$PART_ROOT" /mnt
+BTRFS_OPTS="noatime,compress=zstd:1,space_cache=v2,discard=async"
+mount -o "$BTRFS_OPTS,subvol=@" "$PART_ROOT" /mnt
 
-mkdir -p /mnt/home
 mkdir -p /mnt/boot/efi
-mkdir -p /mnt/etc
-
-mount -o "$OPTS,subvol=@home" "$PART_ROOT" /mnt/home
 mount "$PART_UEFI" /mnt/boot/efi
 
-mkdir -p /cdrom
-mount /dev/cdrom /cdrom || echo "Media already mounted or using an alternative mount point."
+for sub in $CHOSEN_SUBVOLS; do
+    DIR_NAME="${sub#@}"
+    mkdir -p "/mnt/$DIR_NAME"
+    mount -o "$BTRFS_OPTS,subvol=$sub" "$PART_ROOT" "/mnt/$DIR_NAME"
+done
 
-echo "=> Installing Slackware packages for selected series..."
+if [ "$SWAP_TYPE" = "SWAPFILE" ]; then
+    echo "--> Creating Swapfile on non-CoW @swap subvolume..."
+    mkdir -p /mnt/.swap
+    mount -o "noatime,nodatacow,subvol=@swap" "$PART_ROOT" /mnt/.swap
+    truncate -s 0 /mnt/.swap/swapfile
+    chattr +C /mnt/.swap/swapfile
+    btrfs property set /mnt/.swap/swapfile compression none 2>/dev/null || true
+    fallocate -l "${SWAP_SIZE_GB}G" /mnt/.swap/swapfile || dd if=/dev/zero of=/mnt/.swap/swapfile bs=1M count=$(( SWAP_SIZE_GB * 1024 )) status=progress
+    chmod 600 /mnt/.swap/swapfile
+    mkswap /mnt/.swap/swapfile
+    swapon /mnt/.swap/swapfile
+elif [ "$SWAP_TYPE" = "PARTITION" ]; then
+    swapon "$PART_SWAP"
+fi
+
+# ------------------------------------------------------------------------------
+# STEP 10: INSTALL SLACKWARE PACKAGES
+# ------------------------------------------------------------------------------
+echo "--> [4/7] Installing Slackware packages..."
+mkdir -p /cdrom
+mount /dev/cdrom /cdrom 2>/dev/null || echo "CDROM mount skipped or already mounted."
+
+test ! -d "/cdrom/slackware64" && echo "CRITICAL: Slackware package repository not found at /cdrom/slackware64." && exit 1
+
 for pkg in $CATEGORIES; do
-    echo "--> Installing series: [$pkg] <--"
+    echo "Installing package series: [$pkg]..."
     installpkg --terse --root /mnt /cdrom/slackware64/$pkg/*.txz
 done
 
-umount /cdrom
+umount /cdrom 2>/dev/null || true
 
-echo "=== [5/7] Generating Customized fstab (/mnt/etc/fstab) ==="
+# ------------------------------------------------------------------------------
+# STEP 11: SYSTEM SERVICES SELECTION (rc.d DAEMONS)
+# ------------------------------------------------------------------------------
+echo "--> [5/7] Configuring system startup services..."
+
+TEMP_SERVICES=$(mktemp)
+SERVICE_LIST=()
+for s_script in /mnt/etc/rc.d/rc.*; do
+    s_name=$(basename "$s_script")
+    case "$s_name" in
+        rc.0|rc.4|rc.6|rc.K|rc.M|rc.S|rc.local|rc.local_shutdown|rc.modules*|rc.sysvinit) continue ;;
+        *)
+            s_state="OFF"
+            [ -x "$s_script" ] && s_state="ON"
+            SERVICE_LIST+=("$s_name" "Daemon: $s_name" "$s_state")
+            ;;
+    esac
+done
+
+if [ ${#SERVICE_LIST[@]} -gt 0 ]; then
+    dialog --title " System Startup Services " \
+            --checklist "Select services to start automatically on system boot:" 22 70 14 \
+            "${SERVICE_LIST[@]}" 2> "$TEMP_SERVICES"
+
+    CHOSEN_SERVICES=$(cat "$TEMP_SERVICES" | tr -d '"')
+    rm -f "$TEMP_SERVICES"
+
+    for s_script in /mnt/etc/rc.d/rc.*; do
+        s_name=$(basename "$s_script")
+        case "$s_name" in
+            rc.0|rc.4|rc.6|rc.K|rc.M|rc.S|rc.local|rc.local_shutdown|rc.modules*|rc.sysvinit) continue ;;
+            *) chmod 644 "$s_script" ;;
+        esac
+    done
+
+    for s_enable in $CHOSEN_SERVICES; do
+        [ -f "/mnt/etc/rc.d/$s_enable" ] && chmod 755 "/mnt/etc/rc.d/$s_enable"
+    done
+fi
+
+# ------------------------------------------------------------------------------
+# STEP 12: GENERATE FSTAB (UUID BASED)
+# ------------------------------------------------------------------------------
+echo "--> [6/7] Generating /etc/fstab..."
+UUID_ROOT=$(blkid -s UUID -o value "$PART_ROOT")
+UUID_UEFI=$(blkid -s UUID -o value "$PART_UEFI")
+
+mkdir -p /mnt/etc
 cat << EOF > /mnt/etc/fstab
-$PART_ROOT      /               btrfs   noatime,compress=zstd:1,space_cache=v2,discard=async,subvol=@     0 0
-$PART_ROOT      /home           btrfs   noatime,compress=zstd:1,space_cache=v2,discard=async,subvol=@home 0 0
-$PART_UEFI      /boot/efi       vfat    defaults                                                          1 0
-tmpfs           /tmp            tmpfs   noatime,nodev,nosuid,mode=1777                               0 0
-tmpfs           /var/tmp        tmpfs   noatime,nodev,nosuid,mode=1777                               0 0
-tmpfs           /dev/shm        tmpfs   nosuid,nodev,noexec                                          0 0
-devpts          /dev/pts        devpts  gid=5,mode=620                                               0 0
-proc            /proc           proc    defaults                                                     0 0
+UUID=$UUID_ROOT  /               btrfs   $BTRFS_OPTS,subvol=@                                    0 0
+UUID=$UUID_UEFI  /boot/efi       vfat    defaults                                                                1 0
 EOF
 
-echo "=== [6/7] Preparing chroot Environment ==="
+for sub in $CHOSEN_SUBVOLS; do
+    DIR_NAME="${sub#@}"
+    echo "UUID=$UUID_ROOT  /$DIR_NAME           btrfs   $BTRFS_OPTS,subvol=$sub                                0 0" >> /mnt/etc/fstab
+done
+
+if [ "$SWAP_TYPE" = "SWAPFILE" ]; then
+    echo "UUID=$UUID_ROOT  /.swap          btrfs   noatime,nodatacow,subvol=@swap                                          0 0" >> /mnt/etc/fstab
+    echo "/.swap/swapfile                     none            swap    defaults                                                                0 0" >> /mnt/etc/fstab
+elif [ "$SWAP_TYPE" = "PARTITION" ]; then
+    UUID_SWAP=$(blkid -s UUID -o value "$PART_SWAP")
+    echo "UUID=$UUID_SWAP  none            swap    defaults                                                                0 0" >> /mnt/etc/fstab
+fi
+
+if [ "$USE_TMPFS" = "YES" ]; then
+    cat << EOF >> /mnt/etc/fstab
+tmpfs                                     /tmp            tmpfs   noatime,nodev,nosuid,mode=1777                                          0 0
+tmpfs                                     /var/tmp        tmpfs   noatime,nodev,nosuid,mode=1777                                          0 0
+EOF
+fi
+
+cat << EOF >> /mnt/etc/fstab
+tmpfs                                     /dev/shm        tmpfs   nosuid,nodev,noexec                                                     0 0
+devpts                                    /dev/pts        devpts  gid=5,mode=620                                                          0 0
+EOF
+
+# ------------------------------------------------------------------------------
+# STEP 13: CHROOT POST-CONFIGURATION
+# ------------------------------------------------------------------------------
+echo "--> [7/7] Entering chroot for system configuration..."
 mount -t proc /proc /mnt/proc
 mount -o bind /dev /mnt/dev
 mount -o bind /sys /mnt/sys
+mount -o bind /run /mnt/run 2>/dev/null || true
 cp -L /etc/resolv.conf /mnt/etc/resolv.conf
 
-echo "=== [7/7] Configuring the System Inside chroot ==="
 chroot /mnt /bin/bash -c "
     source /etc/profile
 
-    echo '=> Configuring Root Password...'
+    echo 'Setting Root Password:'
     passwd
 
-    echo '=> Creating standard user and configuring Sudo...'
-    useradd -m -g users -G wheel,audio,video,plugdev,power,lp,scanner -s /bin/bash '$NOVO_USUARIO'
-
-    echo 'Set the password for user $NOVO_USUARIO:'
+    echo 'Creating standard user: $NOVO_USUARIO...'
+    useradd -m -g users -G wheel,audio,video,plugdev,cdrom,input,power,lp,scanner,sshd -s /bin/bash '$NOVO_USUARIO'
+    echo 'Set password for $NOVO_USUARIO:'
     passwd '$NOVO_USUARIO'
 
-    if [ -f /etc/sudoers ]; then
-        sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
-    else
-        echo 'WARNING: /etc/sudoers not found.'
+    sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+    sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
+
+    echo 'Configuring keyboard and PATH inside /etc/profile...'
+    echo -e '\nsetxkbmap -model abnt2 -layout br' >> /etc/profile
+    sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
+
+    if [ '$IDIOMA_SELECIONADO' != 'DEFAULT' ]; then
+        echo 'Configuring locale environment ($IDIOMA_SELECIONADO)...'
+
+        cat << 'EOF_SH' > /etc/profile.d/lang.sh
+#!/bin/sh
+# System locale settings
+export LANG=@@LOC@@
+export LANGUAGE=@@LANG_STR@@
+export LC_ADDRESS=@@LOC@@
+export LC_COLLATE=C
+export LC_CTYPE=@@LOC@@
+export LC_IDENTIFICATION=@@LOC@@
+export LC_MEASUREMENT=@@LOC@@
+export LC_MESSAGES=@@LOC@@
+export LC_MONETARY=@@LOC@@
+export LC_NAME=@@LOC@@
+export LC_NUMERIC=@@LOC@@
+export LC_PAPER=@@LOC@@
+export LC_TELEPHONE=@@LOC@@
+export LC_TIME=@@LOC@@
+EOF_SH
+        sed -i 's/@@LOC@@/$IDIOMA_SELECIONADO/g' /etc/profile.d/lang.sh
+        sed -i 's/@@LANG_STR@@/$IDIOMA_LANGUAGE/g' /etc/profile.d/lang.sh
+        chmod 755 /etc/profile.d/lang.sh
+
+        # 2. C-Shell (/etc/profile.d/lang.csh)
+        cat << 'EOF_CSH' > /etc/profile.d/lang.csh
+#!/bin/csh
+# System locale settings for C-shell
+setenv LANG @@LOC@@
+setenv LANGUAGE @@LANG_STR@@
+setenv LC_ADDRESS @@LOC@@
+setenv LC_COLLATE C
+setenv LC_CTYPE @@LOC@@
+setenv LC_IDENTIFICATION @@LOC@@
+setenv LC_MEASUREMENT @@LOC@@
+setenv LC_MESSAGES @@LOC@@
+setenv LC_MONETARY @@LOC@@
+setenv LC_NAME @@LOC@@
+setenv LC_NUMERIC @@LOC@@
+setenv LC_PAPER @@LOC@@
+setenv LC_TELEPHONE @@LOC@@
+setenv LC_TIME @@LOC@@
+EOF_CSH
+        sed -i 's/@@LOC@@/$IDIOMA_SELECIONADO/g' /etc/profile.d/lang.csh
+        sed -i 's/@@LANG_STR@@/$IDIOMA_LANGUAGE/g' /etc/profile.d/lang.csh
+        chmod 755 /etc/profile.d/lang.csh
     fi
 
-    echo '=> Configuring keyboard layout in /etc/profile...'
-    if [ -f /etc/profile ]; then
-        echo '' >> /etc/profile
-        echo 'setxkbmap -model abnt2 -layout br' >> /etc/profile
-    fi
+    mouseconfig
 
-    echo '=> Configuring window manager interface (xwmconfig)...'
-    xwmconfig
+    echo 'Configuring Network & Time...'
+    sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
 
-    echo '=> Updating initdefault runlevel to 4 in /etc/inittab...'
-    if [ -f /etc/inittab ]; then
-        sed -i 's/id:3:initdefault:/id:4:initdefault:/' /etc/inittab
-    fi
-
-    echo '=> Replacing system PATH inside /etc/profile...'
-    if [ -f /etc/profile ]; then
-        sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
-    fi
-
-    echo '=> Applying system language choice ($IDIOMA_SELECIONADO)...'
-    if [ -f /etc/profile.d/lang.sh ]; then
-        sed -i 's/export LANG=.*/export LANG=$IDIOMA_SELECIONADO/' /etc/profile.d/lang.sh
-    fi
-    if [ -f /etc/profile.d/lang.csh ]; then
-        sed -i 's/setenv LANG.*/setenv LANG $IDIOMA_SELECIONADO/' /etc/profile.d/lang.csh
-    fi
-
-    echo '=> Enabling and configuring precision NTP time service...'
-    chmod +x /etc/rc.d/rc.ntpd
-    if [ -f /etc/ntp.conf ]; then
-        sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
-    fi
-
-    echo '=> Configuring Network Layout (netconfig)...'
     netconfig
-
-    echo '=> Configuring Timezone (timeconfig)...'
     timeconfig
 
-    echo '=> Synchronizing system clock with NTP and active hardware time...'
-    ntpdate gps.ntp.br || echo 'ntpdate failed, moving forward.'
-    hwclock --systohc --localtime
-    sh /etc/rc.d/rc.ntpd start
-    date
+    ntpdate gps.ntp.br || echo 'NTP synchronization skipped.'
+    hwclock --systohc --localtime || true
 
-    echo '=> Updating CA Certificates...'
+    xwmconfig
+    sed -i 's/id:3:initdefault:/id:4:initdefault:/' /etc/inittab
+
+    echo 'Updating CA Certificates...'
     update-ca-certificates --fresh 1
 
-    echo '=> Installing and Configuring GRUB...'
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=grub
+    echo 'Installing and configuring GRUB UEFI...'
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=Slackware --recheck
     grub-mkconfig -o /boot/grub/grub.cfg
 "
 
-echo "=== [FINISHED] Unmounting volumes and rebooting system ==="
-umount /mnt/boot/efi
-umount /mnt/home
-umount /mnt/sys
-umount /mnt/dev
-umount /mnt/proc
-umount /mnt
-
-echo "Rebooting in 5 seconds..."
+echo ""
+echo "=============================================================================="
+echo "          INSTALLATION COMPLETED SUCCESSFULLY! REBOOTING IN 5 SECONDS         "
+echo "=============================================================================="
 sleep 5
 reboot
