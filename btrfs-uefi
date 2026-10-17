@@ -487,6 +487,12 @@ EOF_CSH
     echo 'Updating CA Certificates...'
     update-ca-certificates --fresh 1
 
+    echo '=> Configuring Kernel: Forcing kernel-huge exclusively...'
+    HUGE_KERNEL=$(ls -1 /boot/vmlinuz-huge-* 2>/dev/null | head -n 1)
+    if [ -n \"$HUGE_KERNEL\" ]; then
+        ln -sf \"$(basename \"$HUGE_KERNEL\")\" /boot/vmlinuz
+    fi
+
     echo 'Installing and configuring GRUB UEFI...'
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=Slackware --recheck
     grub-mkconfig -o /boot/grub/grub.cfg
