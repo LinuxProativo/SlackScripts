@@ -1,32 +1,37 @@
 #!/bin/bash
+set -e
 
-test "$EUID" -ne 0 && { echo "Error: This script must be run as root (sudo)."; exit 1; }
+# Root privilege check
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: This script must be run as root (sudo)." >&2
+    exit 1
+fi
 
 # 1. OPERATION TYPE MENU
 ACTION=$(dialog --stdout --title "Operation Type" --menu "What operation do you want to perform?" 15 65 3 \
     1 "Create new GPT table and format (Wipes disk)" \
     2 "Only format an existing partition" \
-    3 "Do not format (Configure FSTAB only)")
-
-[ -z "$ACTION" ] && exit 1
+    3 "Do not format (Configure FSTAB only)") || exit 0
 
 # 2. SELECTION LOGIC (DISKS vs PARTITIONS)
 OPTIONS=()
-
 if [ "$ACTION" = "1" ]; then
     while IFS= read -r dev info; do
         OPTIONS+=("/dev/$dev" "$info")
-    done < <(lsblk -dno NAME,SIZE,MODEL)
+    done < <(lsblk -d -n -e 1,4,5,6,7,9,11 -o NAME,SIZE,MODEL | grep -v "zram" || true)
 
-    SELECTED_DISK=$(dialog --stdout --title "Select SSD" --menu "Choose the target drive for the f2fs procedure:" 15 65 6 "${OPTIONS[@]}")
-    [ -z "$SELECTED_DISK" ] && exit 1
+    [ ${#OPTIONS[@]} -eq 0 ] && {
+        dialog --title "Error" --msgbox "No eligible disks found on the system." 6 50
+        exit 1
+    }
 
-    dialog --title "Warning" --yesno "This will wipe ALL data on $SELECTED_DISK. Do you want to continue?" 7 60
-    [ $? -ne 0 ] && exit 1
+    SELECTED_DISK=$(dialog --stdout --title "Select SSD" --menu "Choose target drive for f2fs procedure:" 15 65 6 "${OPTIONS[@]}") || exit 0
 
-    parted -s "$SELECTED_DISK" mklabel gpt mkpart primary f2fs 1MiB 100%
-    udevadm settle
-    partprobe "$SELECTED_DISK"
+    dialog --title "Warning" --yesno "This will wipe ALL data on $SELECTED_DISK.\nDo you want to continue?" 7 60 || exit 0
+
+    parted -s "$SELECTED_DISK" mklabel gpt
+    parted -s "$SELECTED_DISK" mkpart "Root" f2fs 1MiB 100%
+    partprobe "$SELECTED_DISK" 2>/dev/null || true
     udevadm settle
 
     if [[ "$SELECTED_DISK" =~ (nvme|mmcblk) ]]; then
@@ -40,55 +45,46 @@ if [ "$ACTION" = "1" ]; then
 else
     while IFS= read -r dev info; do
         OPTIONS+=("/dev/$dev" "$info")
-    done < <(lsblk -lno NAME,SIZE,FSTYPE,MOUNTPOINT | grep -E 'part|loop' || true)
+    done < <(lsblk -n -l -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE)
 
-    if [ ${#OPTIONS[@]} -eq 0 ]; then
+    [ ${#OPTIONS[@]} -eq 0 ] && {
         dialog --title "Error" --msgbox "No partitions found on the system." 6 50
         exit 1
-    fi
+    }
 
-    PARTITION=$(dialog --stdout --title "Select Partition" --menu "Choose the target partition:" 15 65 6 "${OPTIONS[@]}")
-    [ -z "$PARTITION" ] && exit 1
+    PARTITION=$(dialog --stdout --title "Select Partition" --menu "Choose the target partition:" 15 65 6 "${OPTIONS[@]}") || exit 0
 
     if [ "$ACTION" = "2" ]; then
-        dialog --title "Warning" --yesno "Are you sure you want to format partition $PARTITION now?\nAll data on it will be lost!" 8 60
-        [ $? -ne 0 ] && exit 1
-
+        dialog --title "Warning" --yesno "Are you sure you want to format $PARTITION now?\nAll data on it will be lost!" 8 60 || exit 0
         mkfs.f2fs -f -l "HIKSEMI_WAVE" -o 10 -O extra_attr,inode_checksum,sb_checksum "$PARTITION"
     fi
 fi
 
 # 3. FSTAB PROMPT
-dialog --title "FSTAB Configuration" --yesno "Do you want to write the optimized mount options to fstab?" 7 60
-WRITE_FSTAB=$?
-
-if [ $WRITE_FSTAB -eq 0 ]; then
+if dialog --title "FSTAB Configuration" --yesno "Do you want to write the optimized mount options to fstab?" 7 60; then
 
     # 4. LOCATE FSTAB FILE
     FSTAB_OPTION=$(dialog --stdout --title "Locate fstab" --menu "Where is the target fstab file located?" 15 60 3 \
         1 "/etc/fstab (Current System)" \
         2 "/mnt/etc/fstab (Live/Chroot Environment)" \
-        3 "Locate manually...")
-
-    [ -z "$FSTAB_OPTION" ] && exit 1
+        3 "Locate manually...") || exit 0
 
     case "$FSTAB_OPTION" in
         1) FSTAB_PATH="/etc/fstab" ;;
         2) FSTAB_PATH="/mnt/etc/fstab" ;;
-        3) FSTAB_PATH=$(dialog --stdout --title "Custom fstab Path" --inputbox "Enter the full path to the fstab file:" 8 60 "/etc/fstab") ;;
+        3) FSTAB_PATH=$(dialog --stdout --title "Custom fstab Path" --inputbox "Enter the full path to the fstab file:" 8 60 "/etc/fstab") || exit 0 ;;
     esac
 
     if [ ! -f "$FSTAB_PATH" ]; then
-        dialog --title "FSTAB Missing Error" --msgbox "Error: The fstab file was not found at:\n$FSTAB_PATH\n\nOperation aborted. No changes were made." 8 60
+        dialog --title "FSTAB Missing Error" --msgbox "Error: File not found at:\n$FSTAB_PATH\n\nOperation aborted." 8 60
         exit 1
     fi
 
     # 5. MOUNT POINT PROMPT
-    MOUNT_POINT=$(dialog --stdout --title "Mount Point" --inputbox "Where should this f2fs partition be mounted? (e.g., / , /home, /mnt/games):" 8 60 "/mnt/f2fs")
-    [ -z "$MOUNT_POINT" ] && exit 1
+    MOUNT_POINT=$(dialog --stdout --title "Mount Point" --inputbox "Where should this partition be mounted? (e.g., / , /home, /mnt/games):" 8 60 "/mnt/f2fs") || exit 0
 
     udevadm settle
-    DISK_UUID=$(blkid -o value -s UUID "$PARTITION")
+    DISK_UUID=$(blkid -s UUID -o value "$PARTITION" || true)
 
     if [ -z "$DISK_UUID" ]; then
         dialog --title "Error" --msgbox "Could not retrieve the UUID for partition $PARTITION." 6 60
@@ -97,7 +93,7 @@ if [ $WRITE_FSTAB -eq 0 ]; then
 
     if grep -q "$DISK_UUID" "$FSTAB_PATH"; then
         dialog --title "Warning" --msgbox "UUID $DISK_UUID is already present in $FSTAB_PATH.\nNo changes were made." 8 60
-        exit 1
+        exit 0
     fi
 
     FSTAB_LINE="UUID=$DISK_UUID  $MOUNT_POINT  f2fs  defaults,noatime,discard_unit=section,atgc,gc_merge  0  2"
@@ -107,12 +103,9 @@ if [ $WRITE_FSTAB -eq 0 ]; then
     fi
 
     cp "$FSTAB_PATH" "${FSTAB_PATH}.bak"
+    printf "\n# Optimized F2FS Configuration for Hiksemi Wave SSD (%s)\n%s\n" "$PARTITION" "$FSTAB_LINE" >> "$FSTAB_PATH"
 
-    echo "" >> "$FSTAB_PATH"
-    echo "# Optimized F2FS Configuration for Hiksemi Wave SSD ($PARTITION)" >> "$FSTAB_PATH"
-    echo "$FSTAB_LINE" >> "$FSTAB_PATH"
-
-    dialog --title "Success!" --msgbox "Procedure completed successfully!\n\nPartition: $PARTITION\nUUID: $DISK_UUID\nMount Point: $MOUNT_POINT\nSaved to: $FSTAB_PATH\n\nBackup created at: ${FSTAB_PATH}.bak" 14 65
+    dialog --title "Success!" --msgbox "Procedure completed successfully!\n\nPartition: $PARTITION\nUUID: $DISK_UUID\nMount Point: $MOUNT_POINT\nTarget: $FSTAB_PATH\n\nBackup: ${FSTAB_PATH}.bak" 14 65
 else
     dialog --title "Finished" --msgbox "Operation completed with no changes made to fstab." 6 50
 fi
