@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# AUTOMATED INTERACTIVE SLACKWARE INSTALLER (BTRFS + TIMESHIFT + UEFI + GRUB)
+# AUTOMATED INTERACTIVE SLACKWARE INSTALLER (BTRFS + SUBVOLUME + UEFI + GRUB)
 # ==============================================================================
 set -e
 
@@ -15,41 +15,84 @@ echo ""
 # ------------------------------------------------------------------------------
 # STEP 1: PARTITIONING MODE (WHOLE DISK vs MANUAL SELECTION)
 # ------------------------------------------------------------------------------
-echo "--- [Step 1: Partitioning Mode] ---"
-echo "1) Automatic: Wipe and partition entire disk (GPT + EFI + Root + optional Swap)"
-echo "2) Manual: Select existing EFI and Root partitions"
-read -p "Select partitioning method [1/2]: " PART_MODE
+TMP_STEP1=$(mktemp)
 
-case "$PART_MODE" in
-    1)
-        PART_TYPE="AUTO"
-        lsblk -d -e 7,11 -o NAME,SIZE,MODEL
-        echo ""
-        read -p "Enter target disk device (e.g., /dev/sda, /dev/nvme0n1): " DISCO
-        test ! -b "$DISCO" && echo "ERROR: Device '$DISCO' is not a valid block device." && exit 1
+# 1. Menu de seleção do modo de particionamento
+dialog --title " Step 1: Partitioning Mode " \
+       --menu "Choose how you want to configure your disks:" 14 70 2 \
+       "AUTO"   "Wipe & auto-partition entire disk (GPT + EFI + Root)" \
+       "MANUAL" "Select existing EFI and Root partitions manually" 2> "$TMP_STEP1"
+
+PART_TYPE=$(cat "$TMP_STEP1")
+
+if [ -z "$PART_TYPE" ]; then
+    echo "Partitioning mode selection cancelled. Aborting."
+    rm -f "$TMP_STEP1"
+    exit 1
+fi
+
+case "$PART_TYPE" in
+    AUTO)
+        DISK_OPTIONS=()
+        while read -r d_name d_size d_model; do
+            [ -z "$d_name" ] && continue
+            DISK_OPTIONS+=("/dev/$d_name" "$d_size - ${d_model:-Drive}")
+        done < <(lsblk -d -n -e 1,4,5,6,7,9,11 -o NAME,SIZE,MODEL)
+
+        if [ ${#DISK_OPTIONS[@]} -eq 0 ]; then
+            dialog --msgbox "ERROR: No valid block storage devices found!" 8 50
+            rm -f "$TMP_STEP1"
+            exit 1
+        fi
+
+        dialog --title " Select Target Disk " \
+               --menu "Select the disk to wipe and format (ALL DATA WILL BE ERASED):" 18 70 8 \
+               "${DISK_OPTIONS[@]}" 2> "$TMP_STEP1"
+
+        DISCO=$(cat "$TMP_STEP1")
+        test ! -b "$DISCO" && echo "ERROR: Device '$DISCO' is not a valid block device." && rm -f "$TMP_STEP1" && exit 1
         ;;
-    2)
-        PART_TYPE="MANUAL"
-        lsblk -e 7,11 -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT
-        echo ""
-        read -p "Enter EFI System Partition (e.g., /dev/sda1, /dev/nvme0n1p1): " PART_UEFI
-        read -p "Enter Root Btrfs Partition (e.g., /dev/sda2, /dev/nvme0n1p2): " PART_ROOT
-        test ! -b "$PART_UEFI" -o ! -b "$PART_ROOT" && echo "ERROR: One or more selected partitions do not exist." && exit 1
-        ;;
-    *)
-        echo "Invalid selection. Aborting." && exit 1
+
+    MANUAL)
+        PART_OPTIONS=()
+        while read -r p_name p_size p_type p_fs; do
+            [ "$p_type" != "part" ] && continue
+            PART_OPTIONS+=("/dev/$p_name" "$p_size [${p_fs:-raw}]")
+        done < <(lsblk -n -l -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE)
+
+        if [ ${#PART_OPTIONS[@]} -eq 0 ]; then
+            dialog --msgbox "ERROR: No partitions found! You must create them first." 8 60
+            rm -f "$TMP_STEP1"
+            exit 1
+        fi
+
+        dialog --title " Select EFI System Partition " \
+               --menu "Select your existing EFI System Partition (FAT32):" 18 70 8 \
+               "${PART_OPTIONS[@]}" 2> "$TMP_STEP1"
+        PART_UEFI=$(cat "$TMP_STEP1")
+
+        dialog --title " Select Root Partition " \
+               --menu "Select your target Root partition (will be formatted as Btrfs):" 18 70 8 \
+               "${PART_OPTIONS[@]}" 2> "$TMP_STEP1"
+        PART_ROOT=$(cat "$TMP_STEP1")
+
+        # Validações
+        if [ "$PART_UEFI" = "$PART_ROOT" ]; then
+            dialog --msgbox "ERROR: EFI and Root cannot be the same partition!" 8 55
+            rm -f "$TMP_STEP1"
+            exit 1
+        fi
+
+        test ! -b "$PART_UEFI" -o ! -b "$PART_ROOT" && echo "ERROR: One or more selected partitions do not exist." && rm -f "$TMP_STEP1" && exit 1
         ;;
 esac
+
+rm -f "$TMP_STEP1"
 
 # ------------------------------------------------------------------------------
 # STEP 2: SWAP CONFIGURATION
 # ------------------------------------------------------------------------------
-echo ""
-echo "--- [Step 2: Swap Configuration] ---"
-echo "1) No Swap"
-echo "2) Swap Partition"
-echo "3) Swapfile (on dedicated non-CoW Btrfs subvolume)"
-read -p "Select swap mode [1/2/3] [Default: 1]: " SWAP_CHOICE
+TMP_STEP2=$(mktemp)
 
 MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 RAM_GB=$(( MEM_KB / 1024 / 1024 ))
@@ -61,37 +104,73 @@ test "$RAM_GB" -gt 8 && DEFAULT_SWAP=8
 SWAP_SIZE_GB=0
 PART_SWAP=""
 
-case "$SWAP_CHOICE" in
-    2)
-        SWAP_TYPE="PARTITION"
+dialog --title " Step 2: Swap Configuration " \
+       --menu "Select your swap setup (Detected RAM: ${RAM_GB} GB):" 15 65 3 \
+       "NONE"      "No swap space" \
+       "PARTITION" "Dedicated swap partition" \
+       "SWAPFILE"  "Swapfile on isolated Btrfs subvolume" 2> "$TMP_STEP2"
+
+SWAP_TYPE=$(cat "$TMP_STEP2")
+[ -z "$SWAP_TYPE" ] && SWAP_TYPE="NONE"
+
+case "$SWAP_TYPE" in
+    PARTITION)
         if [ "$PART_TYPE" = "AUTO" ]; then
-            read -p "Enter swap partition size in GiB [Default: ${DEFAULT_SWAP}G]: " USER_SWAP_INPUT
+            dialog --title " Swap Partition Size " \
+                   --inputbox "Enter swap partition size in GiB:\n(Press ENTER to use detected default: ${DEFAULT_SWAP} GB)" 10 65 "$DEFAULT_SWAP" 2> "$TMP_STEP2"
+
+            USER_SWAP_INPUT=$(cat "$TMP_STEP2")
+
             if [[ "$USER_SWAP_INPUT" =~ ^[0-9]+$ ]] && [ "$USER_SWAP_INPUT" -gt 0 ]; then
                 SWAP_SIZE_GB="$USER_SWAP_INPUT"
             else
-                echo "=> No custom size specified. Using default: ${DEFAULT_SWAP} GiB"
                 SWAP_SIZE_GB="$DEFAULT_SWAP"
             fi
         else
-            read -p "Enter existing Swap partition (e.g., /dev/sda3): " PART_SWAP
-            test ! -b "$PART_SWAP" && echo "ERROR: Swap partition '$PART_SWAP' does not exist." && exit 1
+            SWAP_OPTIONS=()
+            while read -r p_name p_size p_type p_fs; do
+                [ "$p_type" != "part" ] && continue
+                p_dev="/dev/$p_name"
+                # Pula as partições já selecionadas no Passo 1
+                [ "$p_dev" = "$PART_UEFI" ] || [ "$p_dev" = "$PART_ROOT" ] && continue
+                SWAP_OPTIONS+=("$p_dev" "$p_size [${p_fs:-raw/swap}]")
+            done < <(lsblk -n -l -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE)
+
+            if [ ${#SWAP_OPTIONS[@]} -eq 0 ]; then
+                dialog --msgbox "WARNING: No free partitions found for Swap. Continuing with NO swap." 8 60
+                SWAP_TYPE="NONE"
+            else
+                dialog --title " Select Swap Partition " \
+                       --menu "Select existing partition to use as Swap:" 18 70 8 \
+                       "${SWAP_OPTIONS[@]}" 2> "$TMP_STEP2"
+
+                PART_SWAP=$(cat "$TMP_STEP2")
+                test ! -b "$PART_SWAP" && echo "ERROR: Swap partition '$PART_SWAP' does not exist." && rm -f "$TMP_STEP2" && exit 1
+            fi
         fi
         ;;
-    3)
-        SWAP_TYPE="SWAPFILE"
-        read -p "Enter swapfile size in GiB [Default: ${DEFAULT_SWAP}G]: " USER_SWAP_INPUT
+
+    SWAPFILE)
+        dialog --title " Swapfile Size " \
+               --inputbox "Enter swapfile size in GiB:\n(Press ENTER to use detected default: ${DEFAULT_SWAP} GB)" 10 65 "$DEFAULT_SWAP" 2> "$TMP_STEP2"
+
+        USER_SWAP_INPUT=$(cat "$TMP_STEP2")
+
+        # Não cancela: se deixar vazio ou digitar errado, segue com o default
         if [[ "$USER_SWAP_INPUT" =~ ^[0-9]+$ ]] && [ "$USER_SWAP_INPUT" -gt 0 ]; then
             SWAP_SIZE_GB="$USER_SWAP_INPUT"
         else
-            echo "=> No custom size specified. Using default: ${DEFAULT_SWAP} GiB"
             SWAP_SIZE_GB="$DEFAULT_SWAP"
         fi
         ;;
-    1|*)
+
+    NONE|*)
         SWAP_TYPE="NONE"
-        echo "=> No swap will be configured."
+        SWAP_SIZE_GB=0
         ;;
 esac
+
+rm -f "$TMP_STEP2"
 
 # ------------------------------------------------------------------------------
 # STEP 3: BTRFS SUBVOLUMES CONFIGURATION
@@ -234,15 +313,15 @@ if [ "$PART_TYPE" = "AUTO" ]; then
     umount -q "${DISCO}"* || true
 
     parted -s "$DISCO" mklabel gpt
-    parted -s "$DISCO" mkpart "EFI" fat32 1MiB 1025MiB
+    parted -s "$DISCO" mkpart "EFI" fat32 1MiB 501MiB
     parted -s "$DISCO" set 1 esp on
 
     if [ "$SWAP_TYPE" = "PARTITION" ]; then
-        SWAP_END=$(( 1025 + SWAP_SIZE_GB * 1024 ))
-        parted -s "$DISCO" mkpart "Swap" linux-swap 1025MiB "${SWAP_END}MiB"
+        SWAP_END=$(( 501 + SWAP_SIZE_GB * 1024 ))
+        parted -s "$DISCO" mkpart "Swap" linux-swap 501MiB "${SWAP_END}MiB"
         parted -s "$DISCO" mkpart "Root" btrfs "${SWAP_END}MiB" 100%
     else
-        parted -s "$DISCO" mkpart "Root" btrfs 1025MiB 100%
+        parted -s "$DISCO" mkpart "Root" btrfs 501MiB 100%
     fi
 
     udevadm settle || sleep 2
@@ -410,9 +489,9 @@ chroot /mnt /bin/bash -c "
     passwd
 
     echo 'Creating standard user: $NOVO_USUARIO...'
-    useradd -m -g users -G wheel,audio,video,plugdev,cdrom,input,power,lp,scanner,sshd -s /bin/bash '$NOVO_USUARIO'
+    useradd -m -g users -G wheel,audio,video,plugdev,cdrom,input,power,lp,scanner,sshd -s /bin/bash \"$NOVO_USUARIO\"
     echo 'Set password for $NOVO_USUARIO:'
-    passwd '$NOVO_USUARIO'
+    passwd \"$NOVO_USUARIO\"
 
     sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
     sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
