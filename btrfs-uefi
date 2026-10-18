@@ -576,11 +576,31 @@ chroot /mnt /bin/bash -c "
     useradd -m -g users -G wheel,audio,video,plugdev,netdev,cdrom,input,power,lp,scanner -s /bin/bash \"$NOVO_USUARIO\"
 
     clear
-    echo 'Setting Root Password'
+    echo '=============================================================================='
+    echo '                     SECURITY: ROOT PASSWORD SETUP                            '
+    echo '=============================================================================='
+    echo ''
+    echo ' Please enter the password for the system administrator (root).'
+    echo ' * Note: Keystrokes will NOT appear on screen while typing.'
+    echo ''
+    echo '------------------------------------------------------------------------------'
     passwd
+    echo ''
+    sleep 1
 
-    echo 'Set password for $NOVO_USUARIO'
+    clear
+    echo '=============================================================================='
+    echo \"               USER SETUP: PASSWORD FOR USER [$NOVO_USUARIO]                  \"
+    echo '=============================================================================='
+    echo ''
+    echo \" Please enter the password for your standard user account: $NOVO_USUARIO\"
+    echo ' * Note: Keystrokes will NOT appear on screen while typing.'
+    echo ''
+    echo '------------------------------------------------------------------------------'
     passwd \"$NOVO_USUARIO\"
+    echo ''
+    sleep 1
+    clear
 
     sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
     sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
@@ -589,7 +609,7 @@ chroot /mnt /bin/bash -c "
     echo -e \"\nsetxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
     sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
 
-    if [ '$IDIOMA_SELECIONADO' != 'DEFAULT' ]; then
+    if [ \"$IDIOMA_SELECIONADO\" != 'DEFAULT' ]; then
         echo 'Configuring locale environment ($IDIOMA_SELECIONADO)...'
 
         cat << 'EOF_SH' > /etc/profile.d/lang.sh
