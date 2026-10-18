@@ -337,19 +337,19 @@ RUNLEVEL_INFO="Runlevel 3 (Text mode / CLI)"
 
 SUMMARY_MSG="Please review the installation parameters carefully:
 
-• Partition Mode:    $PART_TYPE
-• Target Device:     ${DISCO:-Custom Manual Layout}
-• EFI Partition:     $PART_UEFI
-• Root Partition:    $PART_ROOT (Btrfs)
-• Swap Configuration: $SWAP_INFO
-• Btrfs Subvolumes:  @ $CHOSEN_SUBVOLS
-• RAM Disks (tmpfs): $USE_TMPFS
-• System Locale:     $IDIOMA_SELECIONADO
-• LANGUAGE String:   ${IDIOMA_LANGUAGE:-None (Slackware default)}
-• Keyboard Layout:   $XKB_LAYOUT ($XKB_MODEL)
-• Boot Runlevel:     $RUNLEVEL_INFO
-• Standard User:     $NOVO_USUARIO
-• Package Series:    $CATEGORIES
+- Partition Mode:     $PART_TYPE
+- Target Device:      ${DISCO:-Custom Manual Layout}
+- EFI Partition:      $PART_UEFI
+- Root Partition:     $PART_ROOT (Btrfs)
+- Swap Configuration: $SWAP_INFO
+- Btrfs Subvolumes:   @ $CHOSEN_SUBVOLS
+- RAM Disks (tmpfs):  $USE_TMPFS
+- System Locale:      $IDIOMA_SELECIONADO
+- LANGUAGE String:    ${IDIOMA_LANGUAGE:-None (Slackware default)}
+- Keyboard Layout:    $XKB_LAYOUT ($XKB_MODEL)
+- Boot Runlevel:      $RUNLEVEL_INFO
+- Standard User:      $NOVO_USUARIO
+- Package Series:     $CATEGORIES
 
 WARNING: ALL EXISTING DATA ON TARGET PARTITIONS WILL BE DESTROYED!
 
