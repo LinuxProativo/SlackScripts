@@ -46,4 +46,5 @@ chmod +x btrfs-uefi
 
 ## 📝 Lista de Scripts Disponíveis
 
-*   `btrfs-uefi` - Automatiza o particionamento em NVMe, GPT, UEFI, formatação em Btrfs com subvolumes `@` e `@home`, além de gerar o `fstab` otimizado.
+* `btrfs-uefi` - Automatiza o particionamento em NVMe, GPT, UEFI, formatação em Btrfs com subvolumes `@` e `@home`, além de gerar o `fstab` otimizado.
+* `f2fs-format` - Automatiza a formatação F2FS em discos ou partições, usando flags modernas de integridade e adicionando a entrada no `fstab` existente (suporte a Live/Chroot).
