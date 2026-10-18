@@ -29,6 +29,7 @@ if [ "$ACTION" = "1" ]; then
 
     dialog --title "Warning" --yesno "This will wipe ALL data on $SELECTED_DISK.\nDo you want to continue?" 7 60 || exit 0
 
+    echo $SELECTED_DISK
     parted -s "$SELECTED_DISK" mklabel gpt
     parted -s "$SELECTED_DISK" mkpart "Root" f2fs 1MiB 100%
     partprobe "$SELECTED_DISK" 2>/dev/null || true
