@@ -17,8 +17,7 @@ echo ""
 # ------------------------------------------------------------------------------
 TMP_STEP1=$(mktemp)
 
-# 1. Menu de seleção do modo de particionamento
-dialog --title " Step 1: Partitioning Mode " \
+dialog --title " Partitioning Mode " \
        --menu "Choose how you want to configure your disks:" 14 70 2 \
        "AUTO"   "Wipe & auto-partition entire disk (GPT + EFI + Root)" \
        "MANUAL" "Select existing EFI and Root partitions manually" 2> "$TMP_STEP1"
@@ -37,7 +36,7 @@ case "$PART_TYPE" in
         while read -r d_name d_size d_model; do
             [ -z "$d_name" ] && continue
             DISK_OPTIONS+=("/dev/$d_name" "$d_size - ${d_model:-Drive}")
-        done < <(lsblk -d -n -e 1,4,5,6,7,9,11 -o NAME,SIZE,MODEL)
+        done < <(lsblk -d -n -e 1,4,5,6,7,9,11 -o NAME,SIZE,MODEL | grep -v "zram")
 
         if [ ${#DISK_OPTIONS[@]} -eq 0 ]; then
             dialog --msgbox "ERROR: No valid block storage devices found!" 8 50
@@ -76,7 +75,6 @@ case "$PART_TYPE" in
                "${PART_OPTIONS[@]}" 2> "$TMP_STEP1"
         PART_ROOT=$(cat "$TMP_STEP1")
 
-        # Validações
         if [ "$PART_UEFI" = "$PART_ROOT" ]; then
             dialog --msgbox "ERROR: EFI and Root cannot be the same partition!" 8 55
             rm -f "$TMP_STEP1"
@@ -104,7 +102,7 @@ test "$RAM_GB" -gt 8 && DEFAULT_SWAP=8
 SWAP_SIZE_GB=0
 PART_SWAP=""
 
-dialog --title " Step 2: Swap Configuration " \
+dialog --title " Swap Configuration " \
        --menu "Select your swap setup (Detected RAM: ${RAM_GB} GB):" 15 65 3 \
        "NONE"      "No swap space" \
        "PARTITION" "Dedicated swap partition" \
@@ -131,7 +129,6 @@ case "$SWAP_TYPE" in
             while read -r p_name p_size p_type p_fs; do
                 [ "$p_type" != "part" ] && continue
                 p_dev="/dev/$p_name"
-                # Pula as partições já selecionadas no Passo 1
                 [ "$p_dev" = "$PART_UEFI" ] || [ "$p_dev" = "$PART_ROOT" ] && continue
                 SWAP_OPTIONS+=("$p_dev" "$p_size [${p_fs:-raw/swap}]")
             done < <(lsblk -n -l -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE)
@@ -156,7 +153,6 @@ case "$SWAP_TYPE" in
 
         USER_SWAP_INPUT=$(cat "$TMP_STEP2")
 
-        # Não cancela: se deixar vazio ou digitar errado, segue com o default
         if [[ "$USER_SWAP_INPUT" =~ ^[0-9]+$ ]] && [ "$USER_SWAP_INPUT" -gt 0 ]; then
             SWAP_SIZE_GB="$USER_SWAP_INPUT"
         else
@@ -190,10 +186,11 @@ rm -f "$TEMP_SUBVOLS"
 # ------------------------------------------------------------------------------
 # STEP 4: RAM DISKS (TMPFS) CONFIGURATION
 # ------------------------------------------------------------------------------
-read -p "Do you want to mount /tmp and /var/tmp as tmpfs in RAM? [y/N]: " TMPFS_ANSWER
-if [[ "$TMPFS_ANSWER" =~ ^[Yy]$ ]]; then
+if dialog --title " RAM Disk (tmpfs) Configuration " \
+          --defaultno \
+          --yesno "Do you want to mount /tmp and /var/tmp as tmpfs in RAM?\n\n- YES: Ultra-fast, clears on reboot, saves SSD lifespan (Recommended for 8GB+ RAM).\n- NO:  Keeps temporary files stored on disk.\n\n* Note: If YES is selected, any '@tmp' Btrfs subvolume will be automatically excluded to prevent mount conflicts." 13 70; then
     USE_TMPFS="YES"
-    CHOSEN_SUBVOLS=$(echo "$CHOSEN_SUBVOLS" | sed 's/@tmp//g')
+    CHOSEN_SUBVOLS=$(echo "$CHOSEN_SUBVOLS" | sed 's/@tmp//g' | xargs)
 else
     USE_TMPFS="NO"
 fi
@@ -225,6 +222,21 @@ rm -f "$TEMP_CHOSEN"
 
 test -z "$CATEGORIES" && echo "ERROR: No package categories selected! Aborting." && exit 1
 
+RUNLEVEL_DEFAULT="3"
+
+if [[ " $CATEGORIES " =~ [[:space:]](kde|xfce)[[:space:]] ]]; then
+    TEMP_RL=$(mktemp)
+    dialog --title " Default Runlevel Selection (/etc/inittab) " \
+           --menu "A graphical desktop environment (KDE/XFCE) was selected.\nChoose your default system boot mode:" 14 70 2 \
+           "4" "Runlevel 4: Graphical Login (X11/Wayland with SDDM/KDM/GDM/XDM)" \
+           "3" "Runlevel 3: Multi-User Text Console (CLI / startx)" 2> "$TEMP_RL"
+
+    RUNLEVEL_DEFAULT=$(cat "$TEMP_RL")
+    rm -f "$TEMP_RL"
+
+    test -z "$RUNLEVEL_DEFAULT" && RUNLEVEL_DEFAULT="4"
+fi
+
 # ------------------------------------------------------------------------------
 # STEP 6: LOCALE & LANGUAGE SELECTION
 # ------------------------------------------------------------------------------
@@ -241,34 +253,62 @@ dialog --title " System Locale Selection " \
 
 IDIOMA_SELECIONADO=$(cat "$TEMP_LOCALE")
 rm -f "$TEMP_LOCALE"
-clear
 
 case "$IDIOMA_SELECIONADO" in
-    pt_BR.UTF-8) IDIOMA_LANGUAGE="pt_BR:pt" ;;
-    en_US.UTF-8) IDIOMA_LANGUAGE="en_US:en" ;;
-    es_ES.UTF-8) IDIOMA_LANGUAGE="es_ES:es" ;;
-    de_DE.UTF-8) IDIOMA_LANGUAGE="de_DE:de" ;;
-    fr_FR.UTF-8) IDIOMA_LANGUAGE="fr_FR:fr" ;;
-    it_IT.UTF-8) IDIOMA_LANGUAGE="it_IT:it" ;;
-    *)           IDIOMA_LANGUAGE="" ;;
+    pt_BR.UTF-8)
+        IDIOMA_LANGUAGE="pt_BR:pt"
+        XKB_MODEL="abnt2"
+        XKB_LAYOUT="br"
+        ;;
+    en_US.UTF-8)
+        IDIOMA_LANGUAGE="en_US:en"
+        XKB_MODEL="pc105"
+        XKB_LAYOUT="us"
+        ;;
+    es_ES.UTF-8)
+        IDIOMA_LANGUAGE="es_ES:es"
+        XKB_MODEL="pc105"
+        XKB_LAYOUT="es"
+        ;;
+    de_DE.UTF-8)
+        IDIOMA_LANGUAGE="de_DE:de"
+        XKB_MODEL="pc105"
+        XKB_LAYOUT="de"
+        ;;
+    fr_FR.UTF-8)
+        IDIOMA_LANGUAGE="fr_FR:fr"
+        XKB_MODEL="pc105"
+        XKB_LAYOUT="fr"
+        ;;
+    it_IT.UTF-8)
+        IDIOMA_LANGUAGE="it_IT:it"
+        XKB_MODEL="pc105"
+        XKB_LAYOUT="it"
+        ;;
+    *)
+        IDIOMA_LANGUAGE=""
+        XKB_MODEL="pc105"
+        XKB_LAYOUT="us"
+        ;;
 esac
 
 # ------------------------------------------------------------------------------
 # STEP 7: USER CONFIGURATION
 # ------------------------------------------------------------------------------
-read -p "Enter standard user name [Default: slackuser]: " NOVO_USUARIO
+TMP_USER=$(mktemp)
+
+dialog --title " Standard User Setup " \
+       --inputbox "Enter the name for the primary standard user account:\n(This user will be granted sudo access via 'wheel' group)" 10 65 "slackuser" 2> "$TMP_USER"
+
+NOVO_USUARIO=$(cat "$TMP_USER" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+rm -f "$TMP_USER"
+
 test -z "$NOVO_USUARIO" && NOVO_USUARIO="slackuser"
 
 # ------------------------------------------------------------------------------
-# SUMMARY & CONFIRMATION
+# STEP 8: SUMMARY & FINAL CONFIRMATION (DIALOG)
 # ------------------------------------------------------------------------------
-clear
-echo "=============================================================================="
-echo "                         INSTALLATION SUMMARY                                 "
-echo "=============================================================================="
-echo "Partition Mode:     $PART_TYPE"
 if [ "$PART_TYPE" = "AUTO" ]; then
-    echo "Target Disk:        $DISCO"
     if [[ "$DISCO" == *"nvme"* ]] || [[ "$DISCO" == *"mmcblk"* ]]; then
         PART_UEFI="${DISCO}p1"
         if [ "$SWAP_TYPE" = "PARTITION" ]; then
@@ -287,25 +327,48 @@ if [ "$PART_TYPE" = "AUTO" ]; then
         fi
     fi
 fi
-echo "EFI Partition:      $PART_UEFI"
-echo "Root Partition:     $PART_ROOT"
-echo "Swap Type:          $SWAP_TYPE"
-[ "$SWAP_TYPE" = "PARTITION" ] && echo "Swap Partition:     $PART_SWAP"
-[ "$SWAP_TYPE" = "SWAPFILE" ]  && echo "Swapfile Size:      ${SWAP_SIZE_GB} GiB"
-echo "Subvolumes:         @ $CHOSEN_SUBVOLS"
-echo "Mount tmpfs:        $USE_TMPFS"
-echo "Selected Locale:    $IDIOMA_SELECIONADO"
-echo "LANGUAGE string:    $IDIOMA_LANGUAGE"
-echo "LC_COLLATE:         C (Standard Unix collation)"
-echo "Default User:       $NOVO_USUARIO"
-echo "Package Groups:     $CATEGORIES"
-echo "=============================================================================="
-echo "WARNING: ALL DATA ON THE SPECIFIED PARTITIONS/DRIVE WILL BE ERASED!"
-read -p "Are you absolutely sure you want to proceed? Type 'yes' to start: " CONFIRMA
-test "$CONFIRMA" != "yes" && echo "Installation cancelled by user." && exit 1
+
+SWAP_INFO="$SWAP_TYPE"
+[ "$SWAP_TYPE" = "PARTITION" ] && SWAP_INFO="Partition ($PART_SWAP, ${SWAP_SIZE_GB} GiB)"
+[ "$SWAP_TYPE" = "SWAPFILE" ]  && SWAP_INFO="Swapfile (${SWAP_SIZE_GB} GiB on @swap)"
+
+RUNLEVEL_INFO="Runlevel 3 (Text mode / CLI)"
+[ "$RUNLEVEL_DEFAULT" = "4" ] && RUNLEVEL_INFO="Runlevel 4 (Graphical login / Display Manager)"
+
+SUMMARY_MSG="Please review the installation parameters carefully:
+
+• Partition Mode:    $PART_TYPE
+• Target Device:     ${DISCO:-Custom Manual Layout}
+• EFI Partition:     $PART_UEFI
+• Root Partition:    $PART_ROOT (Btrfs)
+• Swap Configuration: $SWAP_INFO
+• Btrfs Subvolumes:  @ $CHOSEN_SUBVOLS
+• RAM Disks (tmpfs): $USE_TMPFS
+• System Locale:     $IDIOMA_SELECIONADO
+• LANGUAGE String:   ${IDIOMA_LANGUAGE:-None (Slackware default)}
+• Keyboard Layout:   $XKB_LAYOUT ($XKB_MODEL)
+• Boot Runlevel:     $RUNLEVEL_INFO
+• Standard User:     $NOVO_USUARIO
+• Package Series:    $CATEGORIES
+
+WARNING: ALL EXISTING DATA ON TARGET PARTITIONS WILL BE DESTROYED!
+
+Are you absolutely sure you want to write changes and begin installation?"
+
+if ! dialog --title " Final Confirmation - Ready to Install " \
+            --defaultno \
+            --yesno "$SUMMARY_MSG" 24 76; then
+    clear
+    echo "=============================================================================="
+    echo "       Installation CANCELLED by user. No disk modifications were made.       "
+    echo "=============================================================================="
+    exit 1
+fi
+
+clear
 
 # ------------------------------------------------------------------------------
-# STEP 8: DISK PARTITIONING & FORMATTING EXECUTION
+# STEP 9: DISK PARTITIONING & FORMATTING EXECUTION
 # ------------------------------------------------------------------------------
 if [ "$PART_TYPE" = "AUTO" ]; then
     echo "--> [1/7] Partitioning disk $DISCO..."
@@ -337,7 +400,7 @@ if [ "$SWAP_TYPE" = "PARTITION" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# STEP 9: BTRFS SUBVOLUMES CREATION & MOUNTING
+# STEP 10: BTRFS SUBVOLUMES CREATION & MOUNTING
 # ------------------------------------------------------------------------------
 echo "--> [3/7] Setting up Btrfs subvolumes..."
 mount -t btrfs "$PART_ROOT" /mnt
@@ -379,25 +442,51 @@ elif [ "$SWAP_TYPE" = "PARTITION" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# STEP 10: INSTALL SLACKWARE PACKAGES
+# STEP 11: INSTALL SLACKWARE PACKAGES (AUTO-DETECT CD-ROM / USB)
 # ------------------------------------------------------------------------------
-echo "--> [4/7] Installing Slackware packages..."
+echo "--> [4/7] Locating Slackware repository and installing packages..."
 mkdir -p /cdrom
-mount /dev/cdrom /cdrom 2>/dev/null || echo "CDROM mount skipped or already mounted."
+SOURCE_DIR=""
 
-test ! -d "/cdrom/slackware64" && echo "CRITICAL: Slackware package repository not found at /cdrom/slackware64." && exit 1
+mount /dev/cdrom /cdrom 2>/dev/null || true
+if [ -d "/cdrom/slackware64" ]; then
+    SOURCE_DIR="/cdrom/slackware64"
+    echo "=> Installation source found: CD-ROM (/dev/cdrom)"
+else
+    umount /cdrom 2>/dev/null || true
+    echo "=> CD-ROM not detected. Scanning for USB installation media..."
+
+    for dev in $(lsblk -lno PATH,TYPE | awk '$2=="part" {print $1}'); do
+        [ "$dev" = "$PART_UEFI" ] || [ "$dev" = "$PART_ROOT" ] && continue
+        [ -n "$PART_SWAP" ] && [ "$dev" = "$PART_SWAP" ] && continue
+
+        mount -o ro "$dev" /cdrom 2>/dev/null || continue
+        if [ -d "/cdrom/slackware64" ]; then
+            SOURCE_DIR="/cdrom/slackware64"
+            echo "=> Installation source found on USB: $dev"
+            break
+        fi
+        umount /cdrom 2>/dev/null || true
+    done
+fi
+
+test -z "$SOURCE_DIR" && echo "CRITICAL: Slackware package repository (slackware64) not found on CD-ROM or USB media." && exit 1
 
 for pkg in $CATEGORIES; do
     echo "Installing package series: [$pkg]..."
-    installpkg --terse --root /mnt /cdrom/slackware64/$pkg/*.txz
+    installpkg --terse --root /mnt "$SOURCE_DIR"/$pkg/*.txz
 done
 
 umount /cdrom 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# STEP 11: SYSTEM SERVICES SELECTION (rc.d DAEMONS)
+# STEP 12: SYSTEM SERVICES SELECTION (rc.d DAEMONS)
 # ------------------------------------------------------------------------------
 echo "--> [5/7] Configuring system startup services..."
+
+chmod 755 /mnt/etc/rc.d/rc.cups || true
+chmod 755 /mnt/etc/rc.d/rc.networkmanager || true
+chmod 755 /mnt/etc/rc.d/rc.ntpd || true
 
 TEMP_SERVICES=$(mktemp)
 SERVICE_LIST=()
@@ -435,7 +524,7 @@ if [ ${#SERVICE_LIST[@]} -gt 0 ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# STEP 12: GENERATE FSTAB (UUID BASED)
+# STEP 13: GENERATE FSTAB (UUID BASED)
 # ------------------------------------------------------------------------------
 echo "--> [6/7] Generating /etc/fstab..."
 UUID_ROOT=$(blkid -s UUID -o value "$PART_ROOT")
@@ -473,7 +562,7 @@ devpts                                    /dev/pts        devpts  gid=5,mode=620
 EOF
 
 # ------------------------------------------------------------------------------
-# STEP 13: CHROOT POST-CONFIGURATION
+# STEP 14: CHROOT POST-CONFIGURATION
 # ------------------------------------------------------------------------------
 echo "--> [7/7] Entering chroot for system configuration..."
 mount -t proc /proc /mnt/proc
@@ -484,20 +573,20 @@ cp -L /etc/resolv.conf /mnt/etc/resolv.conf
 
 chroot /mnt /bin/bash -c "
     source /etc/profile
+    useradd -m -g users -G wheel,audio,video,plugdev,netdev,cdrom,input,power,lp,scanner -s /bin/bash \"$NOVO_USUARIO\"
 
-    echo 'Setting Root Password:'
+    clear
+    echo 'Setting Root Password'
     passwd
 
-    echo 'Creating standard user: $NOVO_USUARIO...'
-    useradd -m -g users -G wheel,audio,video,plugdev,cdrom,input,power,lp,scanner,sshd -s /bin/bash \"$NOVO_USUARIO\"
-    echo 'Set password for $NOVO_USUARIO:'
+    echo 'Set password for $NOVO_USUARIO'
     passwd \"$NOVO_USUARIO\"
 
     sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
     sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
 
     echo 'Configuring keyboard and PATH inside /etc/profile...'
-    echo -e '\nsetxkbmap -model abnt2 -layout br' >> /etc/profile
+    echo -e \"\nsetxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
     sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
 
     if [ '$IDIOMA_SELECIONADO' != 'DEFAULT' ]; then
@@ -550,18 +639,15 @@ EOF_CSH
     fi
 
     mouseconfig
-
-    echo 'Configuring Network & Time...'
-    sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
-
     netconfig
     timeconfig
 
+    sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
     ntpdate gps.ntp.br || echo 'NTP synchronization skipped.'
     hwclock --systohc --localtime || true
 
     xwmconfig
-    sed -i 's/id:3:initdefault:/id:4:initdefault:/' /etc/inittab
+    sed -i 's/id:3:initdefault:/id:$RUNLEVEL_DEFAULT:initdefault:/' /etc/inittab
 
     echo 'Updating CA Certificates...'
     update-ca-certificates --fresh 1
@@ -571,9 +657,21 @@ EOF_CSH
     grub-mkconfig -o /boot/grub/grub.cfg
 "
 
-echo ""
-echo "=============================================================================="
-echo "          INSTALLATION COMPLETED SUCCESSFULLY! REBOOTING IN 5 SECONDS         "
-echo "=============================================================================="
-sleep 5
-reboot
+# ------------------------------------------------------------------------------
+# FINISH & REBOOT DIALOG
+# ------------------------------------------------------------------------------
+clear
+if dialog --title " Installation Complete " \
+          --yesno "Slackware Linux has been successfully installed!\n\nDo you want to reboot the computer now?\n\n(Select 'No' to stay in the live shell to inspect logs or make extra adjustments)" 12 65; then
+    clear
+    echo "Rebooting system now..."
+    sleep 1
+    reboot
+else
+    clear
+    echo "=============================================================================="
+    echo " Installation complete. You are now back in the live environment.            "
+    echo " The new system remains mounted at /mnt.                                      "
+    echo " When you are ready, simply type 'reboot' to restart the machine.             "
+    echo "=============================================================================="
+fi
