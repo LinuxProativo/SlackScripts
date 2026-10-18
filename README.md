@@ -4,7 +4,7 @@ Este repositório é o meu canivete suíço pessoal para o Slackware.
 Uma coleção direto ao ponto de scripts para automatizar qualquer tarefa,
 configuração ou personalização do sistema.
 
-## 🌐 Como configurar a Rede e baixar os scripts no instalador (BusyBox)
+## 🌐 Como configurar a Rede e baixar os scripts no instalador
 
 Como o ambiente de boot do Slackware não possui Git instalado nativamente,
 você deve ativar a rede no terminal e usar o `wget` do BusyBox para baixar os
