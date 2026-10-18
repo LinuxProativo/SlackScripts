@@ -16,7 +16,11 @@ ACTION=$(dialog --stdout --title "Operation Type" --menu "What operation do you 
 # 2. SELECTION LOGIC (DISKS vs PARTITIONS)
 OPTIONS=()
 if [ "$ACTION" = "1" ]; then
-    while IFS= read -r dev info; do
+    # Fix: Use single spaces or underlines for the description to not break dialog arguments
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        dev=$(echo "$line" | awk '{print $1}')
+        info=$(echo "$line" | cut -d' ' -f2-)
         OPTIONS+=("/dev/$dev" "$info")
     done < <(lsblk -d -n -e 1,4,5,6,7,9,11 -o NAME,SIZE,MODEL | grep -v "zram" || true)
 
@@ -27,9 +31,16 @@ if [ "$ACTION" = "1" ]; then
 
     SELECTED_DISK=$(dialog --stdout --title "Select SSD" --menu "Choose target drive for f2fs procedure:" 15 65 6 "${OPTIONS[@]}") || exit 0
 
+    # Ensure device path is clean
+    SELECTED_DISK=$(echo "$SELECTED_DISK" | xargs)
+
+    if [ ! -b "$SELECTED_DISK" ]; then
+        dialog --title "Error" --msgbox "Device $SELECTED_DISK does not exist or is not a block device." 6 60
+        exit 1
+    fi
+
     dialog --title "Warning" --yesno "This will wipe ALL data on $SELECTED_DISK.\nDo you want to continue?" 7 60 || exit 0
 
-    echo $SELECTED_DISK
     parted -s "$SELECTED_DISK" mklabel gpt
     parted -s "$SELECTED_DISK" mkpart "Root" f2fs 1MiB 100%
     partprobe "$SELECTED_DISK" 2>/dev/null || true
@@ -41,10 +52,14 @@ if [ "$ACTION" = "1" ]; then
         PARTITION="${SELECTED_DISK}1"
     fi
 
+    udevadm settle
     mkfs.f2fs -f -l "HIKSEMI_WAVE" -o 10 -O extra_attr,inode_checksum,sb_checksum "$PARTITION"
 
 else
-    while IFS= read -r dev info; do
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        dev=$(echo "$line" | awk '{print $1}')
+        info=$(echo "$line" | cut -d' ' -f2-)
         OPTIONS+=("/dev/$dev" "$info")
     done < <(lsblk -n -l -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE)
 
@@ -54,6 +69,14 @@ else
     }
 
     PARTITION=$(dialog --stdout --title "Select Partition" --menu "Choose the target partition:" 15 65 6 "${OPTIONS[@]}") || exit 0
+
+    # Ensure partition path is clean
+    PARTITION=$(echo "$PARTITION" | xargs)
+
+    if [ ! -b "$PARTITION" ]; then
+        dialog --title "Error" --msgbox "Partition $PARTITION does not exist or is not a block device." 6 60
+        exit 1
+    fi
 
     if [ "$ACTION" = "2" ]; then
         dialog --title "Warning" --yesno "Are you sure you want to format $PARTITION now?\nAll data on it will be lost!" 8 60 || exit 0
