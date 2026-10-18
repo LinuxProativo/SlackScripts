@@ -1,0 +1,126 @@
+#!/bin/bash
+# pkg-clean - Automated package tracker and cleaner for Slackware
+
+set -e
+test "$EUID" -ne 0 && echo "Please run this script as root (su or sudo)." && exit 1
+
+# 1. Select Category via Dialog
+CATEGORY=$(dialog --stdout --title "pkg-clean - Category Selection" \
+    --menu "Choose the application category you want to scan for removal:" 15 60 4 \
+    "Game" "Games and entertainment" \
+    "Education" "Educational applications" \
+    "Development" "Development tools / IDEs" \
+    "Other" "Enter a custom category manually") || exit 0
+
+if [ "$CATEGORY" = "Other" ]; then
+    CATEGORY=$(dialog --stdout --title "pkg-clean - Custom Category" \
+        --inputbox "Enter the exact category name (e.g., AudioVideo, Office, Science):" 10 50) || exit 0
+fi
+
+test -z "$CATEGORY" && exit 0
+
+dialog --infobox "Scanning .desktop files and identifying packages for category '$CATEGORY'...\nPlease wait..." 8 50
+
+MAP_FILE=$(mktemp)
+trap 'rm -f "$MAP_FILE"' EXIT
+
+# 2. Scan .desktop files and match with installed Slackware packages
+for f in /usr/share/applications/*.desktop; do
+    [ -f "$f" ] || continue
+    grep -q "Categories=.*${CATEGORY}" "$f" || continue
+
+    APP_NAME=$(grep -m1 "^Name=" "$f" | cut -d= -f2)
+    APP_CAT=$(grep -m1 "^Categories=" "$f" | cut -d= -f2 | sed -e 's/;$//' -e 's/;/; /g')
+    APP_CAT="${APP_CAT:-$CATEGORY}"
+    DESKTOP_BASE="${f##*/}"
+
+    PACKAGE=$(grep -l "^usr/share/applications/${DESKTOP_BASE}$" /var/lib/pkgtools/packages/* 2>/dev/null | head -n1 || true)
+    test -z "$PACKAGE" && continue
+
+    PACKAGE_BASE="${PACKAGE##*/}"
+    PACKAGE_SHORT="${PACKAGE_BASE%-*-*-*}"
+
+    REPO_SET="unknown"
+    PKG_LOC=$(grep -m1 "^PACKAGE LOCATION:" "$PACKAGE" 2>/dev/null | awk '{print $NF}' || true)
+    if [ -n "$PKG_LOC" ]; then
+        case "$PKG_LOC" in
+            *.t[bglx]z) PKG_LOC="${PKG_LOC%/*}" ;;
+        esac
+        REPO_CANDIDATE="${PKG_LOC##*/}"
+        if [ -n "$REPO_CANDIDATE" ] && [ "$REPO_CANDIDATE" != "." ]; then
+            REPO_SET="$REPO_CANDIDATE"
+        fi
+    fi
+
+    if ! grep -q "^${PACKAGE_SHORT}|" "$MAP_FILE"; then
+        printf "%s|%s|%s|%s\n" "$PACKAGE_SHORT" "$APP_NAME" "$REPO_SET" "$APP_CAT" >> "$MAP_FILE"
+    fi
+done
+
+if [ ! -s "$MAP_FILE" ]; then
+    dialog --title "Notice" --msgbox "No installed packages were found under category '$CATEGORY'." 8 55
+    exit 0
+fi
+
+DIALOG_LIST=()
+while IFS='|' read -r pkg name repo cat; do
+    DIALOG_LIST+=("$pkg" "[$repo] $name [$cat]" "ON")
+done < "$MAP_FILE"
+
+# 3. Show checklist
+SELECTED=$(dialog --stdout --title "pkg-clean - Select for REMOVAL" \
+    --checklist "Keep items CHECKED to REMOVE them.\nUNCHECK packages you want to SAVE (keep on your system):" \
+    22 90 14 "${DIALOG_LIST[@]}") || {
+    dialog --title "Cancelled" --msgbox "Operation cancelled by user. No changes were made." 8 50
+    exit 0
+}
+
+[ -z "$SELECTED" ] && {
+    dialog --title "Notice" --msgbox "No packages were selected. No changes were made." 8 50
+    exit 0
+}
+
+PACKAGES_TO_REMOVE=$(echo "$SELECTED" | tr -d '"')
+
+# 4. Confirmation
+dialog --title "Confirmation" \
+    --yesno "The following packages will be REMOVED via removepkg and blacklisted:\n\n$PACKAGES_TO_REMOVE\n\nAre you sure you want to proceed?" 18 70 || exit 0
+
+clear
+echo "=================================================="
+echo " Starting package removal with removepkg...       "
+echo "=================================================="
+
+BLACKLIST_FILE="/etc/slackpkg/blacklist"
+mkdir -p "${BLACKLIST_FILE%/*}"
+touch "$BLACKLIST_FILE"
+
+HEADER_WRITTEN=0
+
+# 5. Remove packages and blacklist
+for pkg in $PACKAGES_TO_REMOVE; do
+    shopt -s nullglob
+    MATCHES=(/var/log/packages/"${pkg}"-*-*-*)
+    shopt -u nullglob
+
+    if [ ${#MATCHES[@]} -gt 0 ]; then
+        PACKAGE_NAME="${MATCHES[0]##*/}"
+        echo "Removing package: $PACKAGE_NAME"
+        /sbin/removepkg "$PACKAGE_NAME"
+
+        if ! grep -q "^${pkg}$" "$BLACKLIST_FILE"; then
+            if [ "$HEADER_WRITTEN" -eq 0 ]; then
+                printf "\n# Removed by pkg-clean on %s\n" "$(date +%Y-%m-%d)" >> "$BLACKLIST_FILE"
+                HEADER_WRITTEN=1
+            fi
+            echo "Adding $pkg to blacklist file..."
+            echo "$pkg" >> "$BLACKLIST_FILE"
+        fi
+    else
+        echo "Warning: Package $pkg was not found as installed."
+    fi
+done
+
+echo "=================================================="
+echo " Done! System cleaned and blacklist updated.      "
+echo "=================================================="
