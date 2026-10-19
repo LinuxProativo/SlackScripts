@@ -34,6 +34,9 @@ if [ "$ACTION" = "1" ]; then
 
     dialog --title "Warning" --yesno "This will wipe ALL data on $SELECTED_DISK.\nDo you want to continue?" 7 60 || exit 0
 
+    LABEL=$(dialog --stdout --title "Volume Label" --inputbox "Enter a volume label for this drive (No spaces):" 8 60 "F2FS_STORAGE")
+    LABEL=$(echo "$LABEL" | tr -d ' ')
+
     parted -s "$SELECTED_DISK" mklabel gpt
     parted -s "$SELECTED_DISK" mkpart "Root" f2fs 1MiB 100%
     partprobe "$SELECTED_DISK" 2>/dev/null || true
@@ -46,7 +49,7 @@ if [ "$ACTION" = "1" ]; then
     fi
 
     udevadm settle
-    mkfs.f2fs -f -l "HIKSEMI_WAVE" -o 10 -O extra_attr,inode_checksum,sb_checksum "$PARTITION"
+    mkfs.f2fs -f -l "$LABEL" -o 10 -O extra_attr,inode_checksum,sb_checksum "$PARTITION"
 
 else
     while IFS= read -r line; do
@@ -79,7 +82,11 @@ else
 
     if [ "$ACTION" = "2" ]; then
         dialog --title "Warning" --yesno "Are you sure you want to format $PARTITION now?\nAll data on it will be lost!" 8 60 || exit 0
-        mkfs.f2fs -f -l "HIKSEMI_WAVE" -o 10 -O extra_attr,inode_checksum,sb_checksum "$PARTITION"
+
+        LABEL=$(dialog --stdout --title "Volume Label" --inputbox "Enter a volume label for this partition (No spaces):" 8 60 "F2FS_STORAGE")
+        LABEL=$(echo "$LABEL" | tr -d ' ')
+
+        mkfs.f2fs -f -l "$LABEL" -o 10 -O extra_attr,inode_checksum,sb_checksum "$PARTITION"
     fi
 fi
 
