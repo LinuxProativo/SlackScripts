@@ -105,7 +105,6 @@ for pkg in $PACKAGES_TO_REMOVE; do
 
     if [ ${#MATCHES[@]} -gt 0 ]; then
         PACKAGE_NAME="${MATCHES[0]##*/}"
-        echo "Removing package: $PACKAGE_NAME"
         /sbin/removepkg "$PACKAGE_NAME"
 
         if ! grep -q "^${pkg}$" "$BLACKLIST_FILE"; then
