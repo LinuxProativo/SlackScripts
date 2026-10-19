@@ -181,7 +181,7 @@ if dialog --title "FSTAB Configuration" --yesno "Do you want to write the optimi
     fi
 
     cp "$FSTAB_PATH" "${FSTAB_PATH}.bak"
-    printf "\n# Optimized F2FS Configuration for Hiksemi Wave SSD (%s)\n%s\n" "$PARTITION" "$FSTAB_LINE" >> "$FSTAB_PATH"
+    printf "\n%s\n" "$FSTAB_LINE" >> "$FSTAB_PATH"
 
     dialog --title "Success!" --msgbox "Procedure completed successfully!\n\nPartition: $PARTITION\nUUID: $DISK_UUID\nMount Point: $MOUNT_POINT\nTarget: $FSTAB_PATH\n\nBackup: ${FSTAB_PATH}.bak" 14 65
 else

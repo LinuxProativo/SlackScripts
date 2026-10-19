@@ -532,13 +532,14 @@ UUID_UEFI=$(blkid -s UUID -o value "$PART_UEFI")
 
 mkdir -p /mnt/etc
 cat << EOF > /mnt/etc/fstab
-UUID=$UUID_ROOT  /               btrfs   $BTRFS_OPTS,subvol=@                                    0 0
 UUID=$UUID_UEFI  /boot/efi       vfat    defaults                                                                1 0
+UUID=$UUID_ROOT  /               btrfs   $BTRFS_OPTS,subvol=@               0 0
+
 EOF
 
 for sub in $CHOSEN_SUBVOLS; do
     DIR_NAME="${sub#@}"
-    echo "UUID=$UUID_ROOT  /$DIR_NAME           btrfs   $BTRFS_OPTS,subvol=$sub                                0 0" >> /mnt/etc/fstab
+    echo "UUID=$UUID_ROOT  /$DIR_NAME           btrfs   $BTRFS_OPTS,subvol=$sub            0 0" >> /mnt/etc/fstab
 done
 
 if [ "$SWAP_TYPE" = "SWAPFILE" ]; then
@@ -551,14 +552,14 @@ fi
 
 if [ "$USE_TMPFS" = "YES" ]; then
     cat << EOF >> /mnt/etc/fstab
-tmpfs                                     /tmp            tmpfs   noatime,nodev,nosuid,mode=1777                                          0 0
-tmpfs                                     /var/tmp        tmpfs   noatime,nodev,nosuid,mode=1777                                          0 0
+tmpfs                                      /tmp            tmpfs   noatime,nodev,nosuid,mode=1777                                      0 0
+tmpfs                                      /var/tmp        tmpfs   noatime,nodev,nosuid,mode=1777                                      0 0
 EOF
 fi
 
 cat << EOF >> /mnt/etc/fstab
-tmpfs                                     /dev/shm        tmpfs   nosuid,nodev,noexec                                                     0 0
-devpts                                    /dev/pts        devpts  gid=5,mode=620                                                          0 0
+tmpfs                                      /dev/shm        tmpfs   nosuid,nodev,noexec                                                 0 0
+devpts                                     /dev/pts        devpts  gid=5,mode=620                                                      0 0
 EOF
 
 # ------------------------------------------------------------------------------
