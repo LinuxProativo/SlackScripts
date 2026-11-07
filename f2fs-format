@@ -10,14 +10,14 @@ ACTION=$(dialog --stdout --title "Operation Type" --menu "What operation do you 
     3 "Do not format (Configure FSTAB only)") || exit 0
 
 # 2. SELECTION LOGIC (DISKS vs PARTITIONS)
+PARTITION=""
 OPTIONS=()
 if [ "$ACTION" = "1" ]; then
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        dev=$(echo "$line" | awk '{print $1}')
-        info=$(echo "$line" | cut -d' ' -f2-)
-        OPTIONS+=("/dev/$dev" "$info")
-    done < <(lsblk -d -n -e 1,4,5,6,7,9,11 -o NAME,SIZE,MODEL | grep -v "zram" || true)
+    while IFS=';' read -r name size model; do
+        [ -z "$name" ] && continue
+        info="Size: $size | Model: ${model:-Generic}"
+        OPTIONS+=("/dev/$name" "$info")
+    done < <(lsblk -d -n -e 1,4,5,6,7,9,11 -o NAME,SIZE,MODEL --pairs | sed 's/NAME="//;s/" SIZE="/;/;s/" MODEL="/;/;s/"//' | grep -v "zram" || true)
 
     [ ${#OPTIONS[@]} -eq 0 ] && {
         dialog --title "Error" --msgbox "No eligible disks found on the system." 6 50
@@ -42,7 +42,7 @@ if [ "$ACTION" = "1" ]; then
     partprobe "$SELECTED_DISK" 2>/dev/null || true
     udevadm settle
 
-    if [[ "$SELECTED_DISK" =~ (nvme|mmcblk) ]]; then
+    if [[ "$SELECTED_DISK" =~ (nvme|mmcblk|loop) ]]; then
         PARTITION="${SELECTED_DISK}p1"
     else
         PARTITION="${SELECTED_DISK}1"
@@ -88,6 +88,11 @@ else
 
         mkfs.f2fs -f -l "$LABEL" -o 10 -O extra_attr,inode_checksum,sb_checksum "$PARTITION"
     fi
+fi
+
+if [ -z "$PARTITION" ] || [ ! -b "$PARTITION" ]; then
+    dialog --title "Error" --msgbox "Target partition error or scope failure." 6 50
+    exit 1
 fi
 
 # 3. FSTAB PROMPT
@@ -176,8 +181,8 @@ if dialog --title "FSTAB Configuration" --yesno "Do you want to write the optimi
         exit 1
     fi
 
-    if grep -q "$DISK_UUID" "$FSTAB_PATH"; then
-        dialog --title "Warning" --msgbox "UUID $DISK_UUID is already present in $FSTAB_PATH.\nNo changes were made." 8 60
+    if grep -q -E "^UUID=${DISK_UUID}[[:space:]]+" "$FSTAB_PATH"; then
+        dialog --title "Warning" --msgbox "This strict UUID ($DISK_UUID) is already registered in $FSTAB_PATH.\nNo modifications were performed." 8 60
         exit 0
     fi
 

@@ -6,10 +6,10 @@ test "$EUID" -ne 0 && echo "Please run this script as root (su or sudo)." && exi
 
 # 1. Select Category via Dialog
 CATEGORY=$(dialog --stdout --title "pkg-clean - Category Selection" \
-    --menu "Choose the application category you want to scan for removal:" 15 60 4 \
+    --menu "Choose the application category you want to scan for removal:" 15 60 5 \
+    "KDE & Game" "Games that belong to KDE" \
     "Game" "Games and entertainment" \
     "Education" "Educational applications" \
-    "Development" "Development tools / IDEs" \
     "Other" "Enter a custom category manually") || exit 0
 
 if [ "$CATEGORY" = "Other" ]; then
@@ -19,25 +19,52 @@ fi
 
 test -z "$CATEGORY" && exit 0
 
-dialog --infobox "Scanning .desktop files and identifying packages for category '$CATEGORY'...\nPlease wait..." 8 50
+if [ "$CATEGORY" = "KDE & Game" ] || [ "$CATEGORY" = "Game" ] || [ "$CATEGORY" = "Education" ]; then
+    DEFAULT_STATUS="ON"
+else
+    DEFAULT_STATUS="OFF"
+fi
 
+dialog --infobox "Indexing installed packages and scanning .desktop files...\nPlease wait..." 8 50
+PKG_INDEX=$(mktemp)
 MAP_FILE=$(mktemp)
-trap 'rm -f "$MAP_FILE"' EXIT
+trap 'rm -f "$PKG_INDEX" "$MAP_FILE"' EXIT
 
-# 2. Scan .desktop files and match with installed Slackware packages
+awk '
+FNR == 1 {
+    split(FILENAME, parts, "/")
+    pkg = parts[length(parts)]
+}
+/^usr\/share\/applications\/[^\/]+\.desktop$/ {
+    split($0, desktop, "/")
+    print desktop[length(desktop)] ":" pkg
+}' /var/lib/pkgtools/packages/* > "$PKG_INDEX" 2>/dev/null || true
+
+# 2. Scan .desktop files and match with cached package index
 for f in /usr/share/applications/*.desktop; do
-    [ -f "$f" ] || continue
-    grep -q "Categories=.*${CATEGORY}" "$f" || continue
+    test -f "$f" || continue
+    
+    CAT_LINE=$(grep -m1 "^Categories=" "$f" | cut -d= -f2- || true)
+    test -n "$CAT_LINE" || continue
 
-    APP_NAME=$(grep -m1 "^Name=" "$f" | cut -d= -f2)
-    APP_CAT=$(grep -m1 "^Categories=" "$f" | cut -d= -f2 | sed -e 's/;$//' -e 's/;/; /g')
-    APP_CAT="${APP_CAT:-$CATEGORY}"
+    if [ "$CATEGORY" = "KDE & Game" ]; then
+        if ! (echo ";$CAT_LINE;" | grep -q ";KDE;") || ! (echo ";$CAT_LINE;" | grep -E -q ";(Game);"); then
+            continue
+        fi
+    else
+        if ! (echo ";$CAT_LINE;" | grep -q ";${CATEGORY};"); then
+            continue
+        fi
+    fi
+
+    APP_NAME=$(grep -m1 "^Name=" "$f" | cut -d= -f2 || true)
+    APP_CAT=$(echo "$CAT_LINE" | sed -e 's/;$//' -e 's/;/; /g')
     DESKTOP_BASE="${f##*/}"
 
-    PACKAGE=$(grep -l "^usr/share/applications/${DESKTOP_BASE}$" /var/lib/pkgtools/packages/* 2>/dev/null | head -n1 || true)
-    test -z "$PACKAGE" && continue
+    PACKAGE_BASE=$(grep -m1 "^${DESKTOP_BASE}:" "$PKG_INDEX" | cut -d: -f2- || true)
+    [ -n "$PACKAGE_BASE" ] || continue
 
-    PACKAGE_BASE="${PACKAGE##*/}"
+    PACKAGE="/var/lib/pkgtools/packages/$PACKAGE_BASE"
     PACKAGE_SHORT="${PACKAGE_BASE%-*-*-*}"
 
     REPO_SET="unknown"
@@ -64,12 +91,12 @@ fi
 
 DIALOG_LIST=()
 while IFS='|' read -r pkg name repo cat; do
-    DIALOG_LIST+=("$pkg" "[$repo] $name [$cat]" "ON")
+    DIALOG_LIST+=("$pkg" "[$repo] $name [$cat]" "$DEFAULT_STATUS")
 done < "$MAP_FILE"
 
 # 3. Show checklist
 SELECTED=$(dialog --stdout --title "pkg-clean - Select for REMOVAL" \
-    --checklist "Keep items CHECKED to REMOVE them.\nUNCHECK packages you want to SAVE (keep on your system):" \
+    --checklist "Review packages for removal:\nChecked = WILL BE REMOVED | Unchecked = WILL BE SAVED" \
     22 90 14 "${DIALOG_LIST[@]}") || {
     dialog --title "Cancelled" --msgbox "Operation cancelled by user. No changes were made." 8 50
     exit 0
@@ -80,11 +107,11 @@ SELECTED=$(dialog --stdout --title "pkg-clean - Select for REMOVAL" \
     exit 0
 }
 
-PACKAGES_TO_REMOVE=$(echo "$SELECTED" | tr -d '"')
+eval PACKAGES_ARR=($SELECTED)
 
 # 4. Confirmation
 dialog --title "Confirmation" \
-    --yesno "The following packages will be REMOVED via removepkg and blacklisted:\n\n$PACKAGES_TO_REMOVE\n\nAre you sure you want to proceed?" 18 70 || exit 0
+    --yesno "The following packages will be REMOVED via removepkg and blacklisted:\n\n${PACKAGES_ARR[*]}\n\nAre you sure you want to proceed?" 18 70 || exit 0
 
 clear
 echo "=================================================="
@@ -98,7 +125,7 @@ touch "$BLACKLIST_FILE"
 HEADER_WRITTEN=0
 
 # 5. Remove packages and blacklist
-for pkg in $PACKAGES_TO_REMOVE; do
+for pkg in "${PACKAGES_ARR[@]}"; do
     shopt -s nullglob
     MATCHES=(/var/log/packages/"${pkg}"-*-*-*)
     shopt -u nullglob

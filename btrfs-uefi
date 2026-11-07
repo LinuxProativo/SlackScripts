@@ -259,36 +259,43 @@ case "$IDIOMA_SELECIONADO" in
         IDIOMA_LANGUAGE="pt_BR:pt"
         XKB_MODEL="abnt2"
         XKB_LAYOUT="br"
+        KEYMAP="br-abnt2.map"
         ;;
     en_US.UTF-8)
         IDIOMA_LANGUAGE="en_US:en"
         XKB_MODEL="pc105"
         XKB_LAYOUT="us"
+        KEYMAP="us.map"
         ;;
     es_ES.UTF-8)
         IDIOMA_LANGUAGE="es_ES:es"
         XKB_MODEL="pc105"
         XKB_LAYOUT="es"
+        KEYMAP="es.map"
         ;;
     de_DE.UTF-8)
         IDIOMA_LANGUAGE="de_DE:de"
         XKB_MODEL="pc105"
         XKB_LAYOUT="de"
+        KEYMAP="de.map"
         ;;
     fr_FR.UTF-8)
         IDIOMA_LANGUAGE="fr_FR:fr"
         XKB_MODEL="pc105"
         XKB_LAYOUT="fr"
+        KEYMAP="fr.map"
         ;;
     it_IT.UTF-8)
         IDIOMA_LANGUAGE="it_IT:it"
         XKB_MODEL="pc105"
         XKB_LAYOUT="it"
+        KEYMAP="it.map"
         ;;
     *)
         IDIOMA_LANGUAGE=""
         XKB_MODEL="pc105"
         XKB_LAYOUT="us"
+        KEYMAP="us.map"
         ;;
 esac
 
@@ -347,6 +354,7 @@ SUMMARY_MSG="Please review the installation parameters carefully:
 - System Locale:      $IDIOMA_SELECIONADO
 - LANGUAGE String:    ${IDIOMA_LANGUAGE:-None (Slackware default)}
 - Keyboard Layout:    $XKB_LAYOUT ($XKB_MODEL)
+- Console Keymap:     $KEYMAP
 - Boot Runlevel:      $RUNLEVEL_INFO
 - Standard User:      $NOVO_USUARIO
 - Package Series:     $CATEGORIES
@@ -572,6 +580,16 @@ mount -o bind /sys /mnt/sys
 mount -o bind /run /mnt/run 2>/dev/null || true
 cp -L /etc/resolv.conf /mnt/etc/resolv.conf
 
+cat > /mnt/etc/rc.d/rc.keymap << EOF
+#!/bin/sh
+
+if [ -x /usr/bin/loadkeys ]; then
+        /usr/bin/loadkeys $KEYMAP
+fi
+EOF
+
+chmod 755 /mnt/etc/rc.d/rc.keymap
+
 chroot /mnt /bin/bash -c "
     source /etc/profile
     useradd -m -g users -G wheel,audio,video,plugdev,netdev,cdrom,input,power,lp,scanner -s /bin/bash \"$NOVO_USUARIO\"
@@ -671,7 +689,10 @@ EOF_CSH
     sed -i 's/id:3:initdefault:/id:$RUNLEVEL_DEFAULT:initdefault:/' /etc/inittab
 
     echo 'Updating CA Certificates...'
-    update-ca-certificates --fresh 1
+    update-ca-certificates --fresh
+
+    echo 'Generating initrd...'
+    /usr/share/mkinitrd/mkinitrd_command_generator.sh | bash
 
     echo 'Installing and configuring GRUB UEFI...'
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --no-nvram --removable --recheck
