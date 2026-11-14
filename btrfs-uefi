@@ -493,7 +493,6 @@ umount /cdrom 2>/dev/null || true
 echo "--> [5/7] Configuring system startup services..."
 
 chmod 755 /mnt/etc/rc.d/rc.cups || true
-chmod 755 /mnt/etc/rc.d/rc.networkmanager || true
 chmod 755 /mnt/etc/rc.d/rc.ntpd || true
 
 TEMP_SERVICES=$(mktemp)
@@ -501,7 +500,7 @@ SERVICE_LIST=()
 for s_script in /mnt/etc/rc.d/rc.*; do
     s_name=$(basename "$s_script")
     case "$s_name" in
-        rc.0|rc.4|rc.6|rc.K|rc.M|rc.S|rc.local|rc.local_shutdown|rc.modules*|rc.sysvinit) continue ;;
+        rc.0|rc.4|rc.6|rc.K|rc.M|rc.S|rc.local*|rc.modules*|rc.sysvinit|rc.messagebus|rc.elogind|rc.udev) continue ;;
         *)
             s_state="OFF"
             [ -x "$s_script" ] && s_state="ON"
@@ -625,7 +624,7 @@ chroot /mnt /bin/bash -c "
     sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
 
     echo 'Configuring keyboard and PATH inside /etc/profile...'
-    echo -e \"\nsetxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
+    echo -e \"\n[ -n \"\$DISPLAY\" ] && setxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
     sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
 
     if [ \"$IDIOMA_SELECIONADO\" != 'DEFAULT' ]; then
@@ -677,9 +676,21 @@ EOF_CSH
         chmod 755 /etc/profile.d/lang.csh
     fi
 
-    mouseconfig
-    netconfig
-    timeconfig
+    mouseconfig || true
+    netconfig || true
+    timeconfig || true
+
+    if (
+        IFS=''
+        source /etc/rc.d/rc.inet1.conf
+        test -n \"\${IPADDRS[*]}\${IPADDR[*]}\${USE_DHCP[*]}\${IP6ADDRS[*]}\${USE_DHCP6[*]}\"
+    ); then
+        echo 'rc.inet1 configuration detected: keeping NetworkManager disabled.'
+        [ -f /etc/rc.d/rc.networkmanager ] && chmod 644 /etc/rc.d/rc.networkmanager
+    else
+        echo 'rc.inet1.conf untouched (no IP/DHCP): enabling NetworkManager.'
+        [ -f /etc/rc.d/rc.networkmanager ] && chmod 755 /etc/rc.d/rc.networkmanager
+    fi
 
     sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
     ntpdate gps.ntp.br || echo 'NTP synchronization skipped.'
@@ -691,12 +702,12 @@ EOF_CSH
     echo 'Updating CA Certificates...'
     update-ca-certificates --fresh
 
-    echo 'Generating initrd...'
-    /usr/share/mkinitrd/mkinitrd_command_generator.sh | bash
-
     echo 'Installing and configuring GRUB UEFI...'
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --no-nvram --removable --recheck
-    grub-mkconfig -o /boot/grub/grub.cfg
+
+    echo 'Generating initrd and updating GRUB config...'
+    /usr/sbin/geninitrd
+    [ -s /boot/grub/grub.cfg ] || grub-mkconfig -o /boot/grub/grub.cfg
 "
 
 # ------------------------------------------------------------------------------
