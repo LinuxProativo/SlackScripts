@@ -73,7 +73,7 @@ inet 192.168.0.10/24 brd 192.168.0.255 scope global deprecated dynamic noprefixr
 inet6 [ ... ] # só pra exemplo
 ```
 
-Transferindo o diretório inteiro para o boot do Slackware:
+Transferindo o diretório inteiro para o boot do Slackware (exige iniciar o rc.dropbear):
 ```bash
 tar -czf - SlackScripts/ | ssh root@192.168.0.10 "tar -xzf - -C /"
 ```
