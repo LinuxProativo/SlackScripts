@@ -624,7 +624,7 @@ chroot /mnt /bin/bash -c "
     sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
 
     echo 'Configuring keyboard and PATH inside /etc/profile...'
-    echo -e \"\n[ -n \"\$DISPLAY\" ] && setxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
+    echo -e \"\nsetxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
     sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
 
     if [ \"$IDIOMA_SELECIONADO\" != 'DEFAULT' ]; then
@@ -702,12 +702,12 @@ EOF_CSH
     echo 'Updating CA Certificates...'
     update-ca-certificates --fresh
 
+    echo 'Generating initrd...'
+    /usr/share/mkinitrd/mkinitrd_command_generator.sh | bash
+
     echo 'Installing and configuring GRUB UEFI...'
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --no-nvram --removable --recheck
-
-    echo 'Generating initrd and updating GRUB config...'
-    /usr/sbin/geninitrd
-    [ -s /boot/grub/grub.cfg ] || grub-mkconfig -o /boot/grub/grub.cfg
+    grub-mkconfig -o /boot/grub/grub.cfg
 "
 
 # ------------------------------------------------------------------------------
