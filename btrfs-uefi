@@ -512,7 +512,7 @@ done
 if [ ${#SERVICE_LIST[@]} -gt 0 ]; then
     dialog --title " System Startup Services " \
             --checklist "Select services to start automatically on system boot:" 22 70 14 \
-            "${SERVICE_LIST[@]}" 2> "$TEMP_SERVICES"
+            "${SERVICE_LIST[@]}" 2> "$TEMP_SERVICES" || true
 
     CHOSEN_SERVICES=$(cat "$TEMP_SERVICES" | tr -d '"')
     rm -f "$TEMP_SERVICES"
@@ -696,7 +696,7 @@ EOF_CSH
     ntpdate gps.ntp.br || echo 'NTP synchronization skipped.'
     hwclock --systohc --localtime || true
 
-    xwmconfig
+    xwmconfig || true
     sed -i 's/id:3:initdefault:/id:$RUNLEVEL_DEFAULT:initdefault:/' /etc/inittab
 
     echo 'Updating CA Certificates...'
