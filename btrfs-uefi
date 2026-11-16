@@ -480,9 +480,11 @@ fi
 
 test -z "$SOURCE_DIR" && echo "CRITICAL: Slackware package repository (slackware64) not found on CD-ROM or USB media." && exit 1
 
+export INSIDE_INSTALLER=true
+
 for pkg in $CATEGORIES; do
     echo "Installing package series: [$pkg]..."
-    installpkg --terse --root /mnt "$SOURCE_DIR"/$pkg/*.txz
+    installpkg --terse --root /mnt "$SOURCE_DIR"/$pkg/*.t?z
 done
 
 umount /cdrom 2>/dev/null || true
@@ -573,10 +575,22 @@ EOF
 # STEP 14: CHROOT POST-CONFIGURATION
 # ------------------------------------------------------------------------------
 echo "--> [7/7] Entering chroot for system configuration..."
-mount -t proc /proc /mnt/proc
-mount -o bind /dev /mnt/dev
-mount -o bind /sys /mnt/sys
+if [ ! -r /mnt/etc/mtab ]; then
+    mkdir -p /mnt/etc
+    ln -sf /proc/mounts /mnt/etc/mtab
+fi
+
+test -x /mnt/sbin/ldconfig && /mnt/sbin/ldconfig -r /mnt
+
+if [ -d /sys/firmware/efi ] && [ "$(ls -A /sys/firmware/efi/efivars 2>/dev/null | wc -l)" = "0" ]; then
+    mount -t efivarfs none /sys/firmware/efi/efivars
+fi
+
+mount -o rbind /dev /mnt/dev
+mount -o rbind /proc /mnt/proc
+mount -o rbind /sys /mnt/sys
 mount -o bind /run /mnt/run 2>/dev/null || true
+
 cp -L /etc/resolv.conf /mnt/etc/resolv.conf
 
 cat > /mnt/etc/rc.d/rc.keymap << EOF
@@ -702,9 +716,6 @@ EOF_CSH
     echo 'Updating CA Certificates...'
     update-ca-certificates --fresh
 
-    echo 'Generating initrd...'
-    /usr/share/mkinitrd/mkinitrd_command_generator.sh | bash
-
     echo 'Installing and configuring GRUB UEFI...'
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --no-nvram --removable --recheck
     grub-mkconfig -o /boot/grub/grub.cfg
@@ -719,6 +730,9 @@ if dialog --title " Installation Complete " \
     clear
     echo "Rebooting system now..."
     sleep 1
+    swapoff -a 2>/dev/null || true
+    umount -R /mnt 2>/dev/null || true
+    sync
     reboot
 else
     clear
