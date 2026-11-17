@@ -6,6 +6,15 @@ set -e
 
 test "$(id -u)" -ne 0 && echo "CRITICAL ERROR: This script must be executed as root." && exit 1
 
+if [ ! -d /sys/firmware/efi ]; then
+    echo "CRITICAL ERROR: System is not booted in UEFI mode (/sys/firmware/efi not found)."
+    exit 1
+fi
+
+if [ "$(ls -A /sys/firmware/efi/efivars 2>/dev/null | wc -l)" = "0" ]; then
+    mount -t efivarfs none /sys/firmware/efi/efivars 2>/dev/null || true
+fi
+
 clear
 echo "=============================================================================="
 echo "          SLACKWARE ADVANCED BTRFS + UEFI INTERACTIVE INSTALLER               "
@@ -54,10 +63,14 @@ case "$PART_TYPE" in
 
     MANUAL)
         PART_OPTIONS=()
-        while read -r p_name p_size p_type p_fs; do
-            [ "$p_type" != "part" ] && continue
-            PART_OPTIONS+=("/dev/$p_name" "$p_size [${p_fs:-raw}]")
-        done < <(lsblk -n -l -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE)
+        while IFS= read -r line; do
+            eval "$line"
+            [ "$TYPE" != "part" ] && continue
+            case "$LABEL" in
+                USBSLACK*|SLKins_efi*) continue ;;
+            esac
+            PART_OPTIONS+=("/dev/$NAME" "$SIZE [${FSTYPE:-raw}]${LABEL:+ ($LABEL)}")
+        done < <(lsblk -n -l -P -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE,LABEL)
 
         if [ ${#PART_OPTIONS[@]} -eq 0 ]; then
             dialog --msgbox "ERROR: No partitions found! You must create them first." 8 60
@@ -126,12 +139,16 @@ case "$SWAP_TYPE" in
             fi
         else
             SWAP_OPTIONS=()
-            while read -r p_name p_size p_type p_fs; do
-                [ "$p_type" != "part" ] && continue
-                p_dev="/dev/$p_name"
+            while IFS= read -r line; do
+                eval "$line"
+                [ "$TYPE" != "part" ] && continue
+                p_dev="/dev/$NAME"
                 [ "$p_dev" = "$PART_UEFI" ] || [ "$p_dev" = "$PART_ROOT" ] && continue
-                SWAP_OPTIONS+=("$p_dev" "$p_size [${p_fs:-raw/swap}]")
-            done < <(lsblk -n -l -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE)
+                case "$LABEL" in
+                    USBSLACK*|SLKins_efi*) continue ;;
+                esac
+                SWAP_OPTIONS+=("$p_dev" "$SIZE [${FSTYPE:-raw/swap}]")
+            done < <(lsblk -n -l -P -e 1,4,5,6,7,9,11 -o NAME,SIZE,TYPE,FSTYPE,LABEL)
 
             if [ ${#SWAP_OPTIONS[@]} -eq 0 ]; then
                 dialog --msgbox "WARNING: No free partitions found for Swap. Continuing with NO swap." 8 60
@@ -380,8 +397,12 @@ clear
 # ------------------------------------------------------------------------------
 if [ "$PART_TYPE" = "AUTO" ]; then
     echo "--> [1/7] Partitioning disk $DISCO..."
-    swapoff -a || true
-    umount -q "${DISCO}"* || true
+    swapoff -a 2>/dev/null || true
+    umount -R /mnt 2>/dev/null || true
+    for mnt_point in $(lsblk -nr -o MOUNTPOINT "$DISCO" 2>/dev/null | grep -v '^$' | sort -r); do
+        umount -R "$mnt_point" 2>/dev/null || true
+    done
+    wipefs -af "$DISCO" 2>/dev/null || true
 
     parted -s "$DISCO" mklabel gpt
     parted -s "$DISCO" mkpart "EFI" fat32 1MiB 501MiB
@@ -399,7 +420,24 @@ if [ "$PART_TYPE" = "AUTO" ]; then
 fi
 
 echo "--> [2/7] Formatting partitions..."
-mkfs.fat -F32 -n EFI "$PART_UEFI"
+if [ "$PART_TYPE" = "AUTO" ]; then
+    mkfs.fat -F32 -s 2 -n EFI "$PART_UEFI"
+else
+    EFI_TMP=$(mktemp -d)
+    if mount -t vfat "$PART_UEFI" "$EFI_TMP" 2>/dev/null; then
+        umount "$EFI_TMP"
+        if dialog --title " Format Existing EFI Partition? " \
+                  --defaultno \
+                  --yesno "The selected EFI System Partition ($PART_UEFI) is already formatted as FAT32.\n\nDo you want to FORMAT it?\n\n- Select NO to preserve existing bootloaders (recommended for Dual-Boot).\n- Select YES to wipe and format it as FAT32." 12 74; then
+            mkfs.fat -F32 -s 2 -n EFI "$PART_UEFI"
+        fi
+    else
+        mkfs.fat -F32 -s 2 -n EFI "$PART_UEFI"
+    fi
+    rmdir "$EFI_TMP"
+fi
+fsck -yf "$PART_UEFI" >/dev/null 2>&1 || true
+
 mkfs.btrfs -f -L ROOT "$PART_ROOT"
 
 if [ "$SWAP_TYPE" = "PARTITION" ]; then
@@ -427,6 +465,7 @@ mount -o "$BTRFS_OPTS,subvol=@" "$PART_ROOT" /mnt
 
 mkdir -p /mnt/boot/efi
 mount "$PART_UEFI" /mnt/boot/efi
+mkdir -p /mnt/boot/efi/EFI
 
 for sub in $CHOSEN_SUBVOLS; do
     DIR_NAME="${sub#@}"
@@ -482,6 +521,11 @@ test -z "$SOURCE_DIR" && echo "CRITICAL: Slackware package repository (slackware
 
 export INSIDE_INSTALLER=true
 
+if [ ! -r /mnt/etc/mtab ]; then
+    mkdir -p /mnt/etc
+    ln -sf /proc/mounts /mnt/etc/mtab
+fi
+
 for pkg in $CATEGORIES; do
     echo "Installing package series: [$pkg]..."
     installpkg --terse --root /mnt "$SOURCE_DIR"/$pkg/*.t?z
@@ -494,8 +538,8 @@ umount /cdrom 2>/dev/null || true
 # ------------------------------------------------------------------------------
 echo "--> [5/7] Configuring system startup services..."
 
-chmod 755 /mnt/etc/rc.d/rc.cups || true
-chmod 755 /mnt/etc/rc.d/rc.ntpd || true
+chmod 755 /mnt/etc/rc.d/rc.cups 2>/dev/null || true
+chmod 755 /mnt/etc/rc.d/rc.ntpd 2>/dev/null || true
 
 TEMP_SERVICES=$(mktemp)
 SERVICE_LIST=()
@@ -522,7 +566,7 @@ if [ ${#SERVICE_LIST[@]} -gt 0 ]; then
     for s_script in /mnt/etc/rc.d/rc.*; do
         s_name=$(basename "$s_script")
         case "$s_name" in
-            rc.0|rc.4|rc.6|rc.K|rc.M|rc.S|rc.local|rc.local_shutdown|rc.modules*|rc.sysvinit) continue ;;
+            rc.0|rc.4|rc.6|rc.K|rc.M|rc.S|rc.local*|rc.modules*|rc.sysvinit|rc.messagebus|rc.elogind|rc.udev) continue ;;
             *) chmod 644 "$s_script" ;;
         esac
     done
@@ -567,6 +611,7 @@ EOF
 fi
 
 cat << EOF >> /mnt/etc/fstab
+proc                                       /proc           proc    defaults                                                            0 0
 tmpfs                                      /dev/shm        tmpfs   nosuid,nodev,noexec                                                 0 0
 devpts                                     /dev/pts        devpts  gid=5,mode=620                                                      0 0
 EOF
@@ -580,10 +625,14 @@ if [ ! -r /mnt/etc/mtab ]; then
     ln -sf /proc/mounts /mnt/etc/mtab
 fi
 
+chmod 755 /mnt /mnt/var
+mkdir -p /mnt/tmp
+chmod 1777 /mnt/tmp
+
 test -x /mnt/sbin/ldconfig && /mnt/sbin/ldconfig -r /mnt
 
 if [ -d /sys/firmware/efi ] && [ "$(ls -A /sys/firmware/efi/efivars 2>/dev/null | wc -l)" = "0" ]; then
-    mount -t efivarfs none /sys/firmware/efi/efivars
+    mount -t efivarfs none /sys/firmware/efi/efivars 2>/dev/null || true
 fi
 
 mount -o rbind /dev /mnt/dev
@@ -602,6 +651,88 @@ fi
 EOF
 
 chmod 755 /mnt/etc/rc.d/rc.keymap
+
+echo "--> Generating initial ramdisk (mkinitrd_command_generator.sh)..."
+PART_ROOT="$PART_ROOT" chroot /mnt /bin/bash << 'EOF_INITRD'
+set -e
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin"
+
+# 1. Localiza o kernel instalado (mesma lógica do setup.01.mkinitrd)
+KERNEL="/boot/vmlinuz-generic"
+if [ ! -e "$KERNEL" ]; then
+    KERNEL="/boot/vmlinuz"
+fi
+if [ ! -e "$KERNEL" ]; then
+    KERNEL="$(find /boot -maxdepth 1 -name "vmlinuz-*" -type f | xargs ls -t 2>/dev/null | head -n 1)"
+fi
+KERNEL="$(readlink -f "$KERNEL")"
+
+if [ ! -r "$KERNEL" ]; then
+    echo "CRITICAL ERROR: No valid Linux kernel found in /boot!"
+    exit 1
+fi
+
+KERNEL_VERSION=""
+if command -v strings >/dev/null 2>&1; then
+    KERNEL_VERSION=$(strings "$KERNEL" | grep '([^ ]*@[^ ]*) #' | cut -f1 -d' ' || true)
+fi
+if [ -z "$KERNEL_VERSION" ] && command -v file >/dev/null 2>&1; then
+    KERNEL_VERSION=$(file -bL "$KERNEL" | sed -n 's/.*version \([^ ]*\).*/\1/p' || true)
+fi
+if [ -z "$KERNEL_VERSION" ]; then
+    KERNEL_VERSION=$(ls -1 /lib/modules | sort -V | tail -n 1)
+fi
+
+echo "=> Kernel: $KERNEL ($KERNEL_VERSION)"
+
+# 2. Gera o comando com mkinitrd_command_generator.sh (-L LVM, -R RAID, -B Btrfs)
+MKINITRD_CMD=$(/usr/share/mkinitrd/mkinitrd_command_generator.sh \
+    -k "$KERNEL_VERSION" \
+    -a "-L -R -B -o /boot/initrd-${KERNEL_VERSION}.img" \
+    | grep -E '^[[:space:]]*(/sbin/)?mkinitrd ' | tail -n 1 || true)
+
+# Fallback / garantia de Btrfs + módulo btrfs + rootdev caso o chroot omita algo
+if [ -z "$MKINITRD_CMD" ]; then
+    MKINITRD_CMD="mkinitrd -c -k $KERNEL_VERSION -f btrfs -r $PART_ROOT -m btrfs -u -L -R -B -o /boot/initrd-${KERNEL_VERSION}.img"
+else
+    if ! echo "$MKINITRD_CMD" | grep -qE '(^| )-m "?[^"]*btrfs'; then
+        if echo "$MKINITRD_CMD" | grep -q ' -m '; then
+            MKINITRD_CMD=$(echo "$MKINITRD_CMD" | sed -E 's/ -m "?([^" ]*)"?/ -m \1:btrfs/')
+        else
+            MKINITRD_CMD="$MKINITRD_CMD -m btrfs"
+        fi
+    fi
+    if ! echo "$MKINITRD_CMD" | grep -q ' -f '; then
+        MKINITRD_CMD="$MKINITRD_CMD -f btrfs"
+    fi
+    if ! echo "$MKINITRD_CMD" | grep -q ' -r '; then
+        MKINITRD_CMD="$MKINITRD_CMD -r $PART_ROOT"
+    fi
+fi
+
+echo "=> Running: $MKINITRD_CMD"
+eval "$MKINITRD_CMD"
+
+# 3. Cria os symlinks padrão do setup.01.mkinitrd (initrd-generic.img e initrd.gz)
+(
+    cd /boot
+    for symlink in $(find . -maxdepth 1 -type l -name "vmlinuz-*"); do
+        SYMLINK_VERSION=""
+        if command -v strings >/dev/null 2>&1; then
+            SYMLINK_VERSION=$(strings "$symlink" | grep '([^ ]*@[^ ]*) #' | cut -f1 -d' ' || true)
+        fi
+        if [ "$SYMLINK_VERSION" = "$KERNEL_VERSION" ] || [ "$(readlink -f "$symlink")" = "$KERNEL" ]; then
+            KERNEL_NAME="$(echo "$symlink" | cut -f 2- -d -)"
+            ln -sf "initrd-${KERNEL_VERSION}.img" "initrd-${KERNEL_NAME}.img"
+        fi
+    done
+    ln -sf "initrd-${KERNEL_VERSION}.img" initrd.gz
+)
+
+# 4. Limpa a árvore temporária (como o AUTO_REMOVE_INITRD_TREE=true)
+rm -rf /boot/initrd-tree
+EOF_INITRD
+
 
 chroot /mnt /bin/bash -c "
     source /etc/profile
@@ -638,7 +769,7 @@ chroot /mnt /bin/bash -c "
     sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
 
     echo 'Configuring keyboard and PATH inside /etc/profile...'
-    echo -e \"\nsetxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
+    echo -e \"\n[ -n \"\$DISPLAY\" ] && setxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
     sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
 
     if [ \"$IDIOMA_SELECIONADO\" != 'DEFAULT' ]; then
@@ -708,13 +839,25 @@ EOF_CSH
 
     sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
     ntpdate gps.ntp.br || echo 'NTP synchronization skipped.'
-    hwclock --systohc --localtime || true
+    hwclock --systohc || true
 
     xwmconfig || true
     sed -i 's/id:3:initdefault:/id:$RUNLEVEL_DEFAULT:initdefault:/' /etc/inittab
 
     echo 'Updating CA Certificates...'
     update-ca-certificates --fresh
+
+    # Default vim for vi and ex (UTF-8)...
+    if [ -x /usr/bin/vim ]; then
+        ln -sf vim /usr/bin/ex
+        ln -sf vim /usr/bin/vi
+    fi
+
+    # Update font caches, .desktop menus, MIME and icons...
+    [ -x /usr/bin/fc-cache ] && fc-cache -f 2>/dev/null || true
+    [ -x /usr/bin/update-desktop-database ] && update-desktop-database /usr/share/applications 2>/dev/null || true
+    [ -x /usr/bin/update-mime-database ] && update-mime-database /usr/share/mime 2>/dev/null || true
+    [ -x /usr/bin/gtk-update-icon-cache ] && [ -e /usr/share/icons/hicolor/icon-theme.cache ] && gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 
     echo 'Installing and configuring GRUB UEFI...'
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --no-nvram --removable --recheck

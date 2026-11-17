@@ -1,0 +1,176 @@
+#!/bin/bash
+
+[ "$EUID" -ne 0 ] && echo "Please run as root." && exit 1
+
+for cmd in dialog lsblk btrfs blkid awk; do
+    command -v "$cmd" &>/dev/null || {
+        echo "[!] Missing dependency: $cmd"
+        exit 1
+    }
+done
+
+TARGET=""
+EXTRA_MOUNTS=()
+RESOLV_BAK=""
+RESOLV_COPIED=0
+CHROOT_MOUNTED=0
+
+cleanup() {
+    echo -e "\n[*] Unmounting filesystems..."
+
+    if [ "$RESOLV_COPIED" -eq 1 ] && [ -n "$TARGET" ]; then
+        rm -f "$TARGET/etc/resolv.conf"
+        [ -n "$RESOLV_BAK" ] && { [ -e "$RESOLV_BAK" ] || [ -L "$RESOLV_BAK" ]; } && mv "$RESOLV_BAK" "$TARGET/etc/resolv.conf"
+    fi
+
+    if [ "$CHROOT_MOUNTED" -eq 1 ] && [ -n "$TARGET" ]; then
+        umount -l "$TARGET/run" 2>/dev/null
+        umount -R "$TARGET/dev" 2>/dev/null
+        umount -R "$TARGET/sys" 2>/dev/null
+        umount "$TARGET/proc" 2>/dev/null
+    fi
+
+    for (( i=${#EXTRA_MOUNTS[@]}-1; i>=0; i-- )); do
+        umount -l "${EXTRA_MOUNTS[$i]}" 2>/dev/null
+    done
+
+    [ -n "$TARGET" ] && mountpoint -q "$TARGET" && { umount "$TARGET" 2>/dev/null || umount -l "$TARGET" 2>/dev/null; }
+    [ -n "$TARGET" ] && [ -d "$TARGET" ] && rmdir "$TARGET" 2>/dev/null
+
+    echo "[*] Done!"
+}
+trap cleanup EXIT INT TERM
+
+# --- 1. Single dialog to select disk ---
+MENU_ITEMS=()
+while IFS= read -r dev; do
+    size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null)
+    model=$(lsblk -dn -o MODEL "$dev" 2>/dev/null | xargs)
+    MENU_ITEMS+=("$dev" "${size} - ${model:-Disk}")
+done < <(lsblk -dn -p -o NAME,TYPE | awk '$2=="disk" {print $1}')
+
+[ ${#MENU_ITEMS[@]} -eq 0 ] && echo "[!] No disks found." && exit 1
+
+DISK=$(dialog --clear --stdout \
+    --title "Auto Chroot Btrfs" \
+    --menu "Select the target disk:" 15 65 6 \
+    "${MENU_ITEMS[@]}")
+
+clear
+[ -z "$DISK" ] && echo "[!] Operation cancelled." && exit 1
+echo "[*] Selected disk: $DISK"
+
+# --- 2. Auto-detect Btrfs partition ---
+BTRFS_PART=$(lsblk -lnb -p -o NAME,FSTYPE,SIZE "$DISK" | awk '$2=="btrfs" {print $3, $1}' | sort -rn | awk '{print $2}' | head -n1)
+[ -z "$BTRFS_PART" ] && echo "[!] No Btrfs partition found on $DISK." && exit 1
+echo "[*] Detected Btrfs partition: $BTRFS_PART"
+
+TARGET=$(mktemp -d /mnt/autochroot.XXXXXX)
+
+# --- 3. Detect Btrfs root subvolume ---
+echo "[*] Inspecting Btrfs layout..."
+mount -o subvolid=5 "$BTRFS_PART" "$TARGET" || {
+    echo "[!] Failed to mount $BTRFS_PART."
+    exit 1
+}
+
+ROOT_SUBVOL=""
+
+if [ -f "$TARGET/etc/fstab" ] && { [ -x "$TARGET/bin/bash" ] || [ -x "$TARGET/usr/bin/bash" ]; }; then
+    ROOT_SUBVOL="/"
+else
+    for candidate in "@" "@rootfs" "root" "@root"; do
+        [ -f "$TARGET/$candidate/etc/fstab" ] && { [ -x "$TARGET/$candidate/bin/bash" ] || [ -x "$TARGET/$candidate/usr/bin/bash" ]; } && {
+            ROOT_SUBVOL="$candidate"
+            break
+        }
+    done
+
+    if [ -z "$ROOT_SUBVOL" ]; then
+        while IFS= read -r sub; do
+            [ -f "$TARGET/$sub/etc/fstab" ] && { [ -x "$TARGET/$sub/bin/bash" ] || [ -x "$TARGET/$sub/usr/bin/bash" ]; } && {
+                ROOT_SUBVOL="$sub"
+                break
+            }
+        done < <(btrfs subvolume list "$TARGET" | awk '{print $NF}')
+    fi
+fi
+
+[ -z "$ROOT_SUBVOL" ] && echo "[!] Could not identify the root subvolume on $BTRFS_PART." && exit 1
+
+if [ "$ROOT_SUBVOL" != "/" ]; then
+    echo "[*] Root subvolume detected: $ROOT_SUBVOL"
+    umount "$TARGET"
+    mount -o "subvol=$ROOT_SUBVOL" "$BTRFS_PART" "$TARGET" || exit 1
+else
+    echo "[*] System installed at Btrfs top-level (subvolid=5)."
+fi
+
+# --- 4. Mount additional Btrfs subvolumes from /etc/fstab ---
+BTRFS_UUID=$(blkid -s UUID -o value "$BTRFS_PART")
+
+if [ -f "$TARGET/etc/fstab" ]; then
+    echo "[*] Mapping additional subvolumes from /etc/fstab..."
+    while read -r fs_spec fs_file fs_vfstype fs_mntops _; do
+        [[ -z "$fs_spec" || "$fs_spec" == \#* ]] && continue
+        [ "$fs_vfstype" != "btrfs" ] || [ "$fs_file" = "/" ] && continue
+        [[ "$fs_spec" == UUID=* ]] && [ "${fs_spec#UUID=}" != "$BTRFS_UUID" ] && continue
+
+        subvol=$(echo "$fs_mntops" | tr ',' '\n' | awk -F= '$1=="subvol" {print $2; exit}')
+        if [ -n "$subvol" ]; then
+            mkdir -p "$TARGET$fs_file"
+            mount -o "subvol=$subvol" "$BTRFS_PART" "$TARGET$fs_file" 2>/dev/null && {
+                echo "    + Subvolume '$subvol' -> $fs_file"
+                EXTRA_MOUNTS+=("$TARGET$fs_file")
+            }
+        fi
+    done < "$TARGET/etc/fstab"
+fi
+
+# --- 5. Auto-detect and mount EFI partition ---
+EFI_PART=$(lsblk -ln -p -o NAME,PARTTYPE,FSTYPE "$DISK" | awk 'tolower($2) ~ /c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef|^ef$/ {print $1; exit}')
+[ -z "$EFI_PART" ] && EFI_PART=$(lsblk -ln -p -o NAME,FSTYPE,PARTLABEL "$DISK" | awk '$2=="vfat" && tolower($3) ~ /efi/ {print $1; exit}')
+
+if [ -n "$EFI_PART" ]; then
+    EFI_MNT=$(awk '!/^#/ && $3=="vfat" && ($2=="/boot/efi" || $2=="/efi" || $2=="/boot") {print $2; exit}' "$TARGET/etc/fstab" 2>/dev/null)
+    [ -z "$EFI_MNT" ] && { [ -d "$TARGET/efi" ] && [ ! -d "$TARGET/boot/efi" ] && EFI_MNT="/efi" || EFI_MNT="/boot/efi"; }
+
+    mkdir -p "$TARGET$EFI_MNT"
+    if mount "$EFI_PART" "$TARGET$EFI_MNT"; then
+        echo "[*] EFI ($EFI_PART) mounted at $EFI_MNT"
+        EXTRA_MOUNTS+=("$TARGET$EFI_MNT")
+    else
+        echo "[!] Warning: failed to mount EFI ($EFI_PART)."
+    fi
+else
+    echo "[!] No EFI partition detected on $DISK (continuing without EFI)."
+fi
+
+# --- 6. Mount essential virtual filesystems ---
+echo "[*] Mounting essential filesystems..."
+
+mount --types proc /proc "$TARGET/proc"
+mount --rbind /sys "$TARGET/sys"
+mount --make-rslave "$TARGET/sys"
+mount --rbind /dev "$TARGET/dev"
+mount --make-rslave "$TARGET/dev"
+mount --bind /run "$TARGET/run"
+CHROOT_MOUNTED=1
+
+if [ ! -e "$TARGET/etc/resolv.conf" ]; then
+    echo "[*] Copying /etc/resolv.conf for network access..."
+    [ -L "$TARGET/etc/resolv.conf" ] && {
+        RESOLV_BAK="$TARGET/etc/resolv.conf.autochroot.bak"
+        mv "$TARGET/etc/resolv.conf" "$RESOLV_BAK"
+    }
+    cp /etc/resolv.conf "$TARGET/etc/resolv.conf"
+    RESOLV_COPIED=1
+fi
+
+# --- 7. Enter chroot ---
+echo "[*] Entering chroot environment at $TARGET..."
+SHELL_BIN="/bin/bash"
+[ ! -x "$TARGET$SHELL_BIN" ] && SHELL_BIN="/usr/bin/bash"
+[ ! -x "$TARGET$SHELL_BIN" ] && SHELL_BIN="/bin/sh"
+
+chroot "$TARGET" "$SHELL_BIN"

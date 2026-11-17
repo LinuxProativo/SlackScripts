@@ -122,8 +122,6 @@ mkdir -p /mnt/usb
 mount /dev/sdb1 /mnt/usb
 ```
 
-
-
 ### Extra: Servidor Local
 
 Isso também funciona só que é menos prático.
@@ -145,10 +143,12 @@ wget -c http://192.168.0.09:8080/btrfs-uefi
 
 ## 📝 Lista de Scripts Disponíveis
 
-* `btrfs-uefi` - Automatiza o particionamento em NVMe, GPT, UEFI, formatação em Btrfs
-  com subvolumes `@` e `@home`, além de gerar o `fstab` otimizado.
+* `auto-chroot-btrfs` - Auto chroot automático para rodar no modo LiveCD ou ambiente de
+  instalação para montar e acessar facilmente sistemas instalados em Btrfs com subvolume.
+* `btrfs-uefi-setup` - Setup custom para particionamento GPT, UEFI, formatação em Btrfs
+  com subvolumes `@` e `@home`, `fstab` otimizado, configuração de idioma, criação de
+  usuário, ativação do sudo, inittab runlevel 4 e demais configurações.
 * `f2fs-format` - Automatiza a formatação F2FS em discos ou partições, com flags modernas
   de integridade e adição de entrada no `fstab` existente (suporte a Live/Chroot).
 * `pkg-clean` - Automatiza a limpeza de pacotes por categorias, principalmente os jogos
   do **`KDE GAMES`** que eu nem sei se tem alguém que joga.
-
