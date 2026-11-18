@@ -657,7 +657,6 @@ PART_ROOT="$PART_ROOT" chroot /mnt /bin/bash << 'EOF_INITRD'
 set -e
 export PATH="/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin"
 
-# 1. Localiza o kernel instalado (mesma lógica do setup.01.mkinitrd)
 KERNEL="/boot/vmlinuz-generic"
 if [ ! -e "$KERNEL" ]; then
     KERNEL="/boot/vmlinuz"
@@ -685,13 +684,11 @@ fi
 
 echo "=> Kernel: $KERNEL ($KERNEL_VERSION)"
 
-# 2. Gera o comando com mkinitrd_command_generator.sh (-L LVM, -R RAID, -B Btrfs)
 MKINITRD_CMD=$(/usr/share/mkinitrd/mkinitrd_command_generator.sh \
     -k "$KERNEL_VERSION" \
     -a "-L -R -B -o /boot/initrd-${KERNEL_VERSION}.img" \
     | grep -E '^[[:space:]]*(/sbin/)?mkinitrd ' | tail -n 1 || true)
 
-# Fallback / garantia de Btrfs + módulo btrfs + rootdev caso o chroot omita algo
 if [ -z "$MKINITRD_CMD" ]; then
     MKINITRD_CMD="mkinitrd -c -k $KERNEL_VERSION -f btrfs -r $PART_ROOT -m btrfs -u -L -R -B -o /boot/initrd-${KERNEL_VERSION}.img"
 else
@@ -713,7 +710,6 @@ fi
 echo "=> Running: $MKINITRD_CMD"
 eval "$MKINITRD_CMD"
 
-# 3. Cria os symlinks padrão do setup.01.mkinitrd (initrd-generic.img e initrd.gz)
 (
     cd /boot
     for symlink in $(find . -maxdepth 1 -type l -name "vmlinuz-*"); do
@@ -729,7 +725,6 @@ eval "$MKINITRD_CMD"
     ln -sf "initrd-${KERNEL_VERSION}.img" initrd.gz
 )
 
-# 4. Limpa a árvore temporária (como o AUTO_REMOVE_INITRD_TREE=true)
 rm -rf /boot/initrd-tree
 EOF_INITRD
 
@@ -769,8 +764,8 @@ chroot /mnt /bin/bash -c "
     sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
 
     echo 'Configuring keyboard and PATH inside /etc/profile...'
-    echo -e \"\n[ -n \"\$DISPLAY\" ] && setxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
-    sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin\"|' /etc/profile
+    echo -e \"\n[ -n \"\\\$DISPLAY\" ] && setxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT\" >> /etc/profile
+    sed -i 's|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"|PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games:/usr/local/sbin:/usr/sbin:/sbin\"|' /etc/profile
 
     if [ \"$IDIOMA_SELECIONADO\" != 'DEFAULT' ]; then
         echo 'Configuring locale environment ($IDIOMA_SELECIONADO)...'
@@ -837,9 +832,26 @@ EOF_CSH
         [ -f /etc/rc.d/rc.networkmanager ] && chmod 755 /etc/rc.d/rc.networkmanager
     fi
 
-    sed -i '/# pool.ntp.org/i server gps.ntp.br iburst nts' /etc/ntp.conf
-    ntpdate gps.ntp.br || echo 'NTP synchronization skipped.'
-    hwclock --systohc || true
+    if [ \"$IDIOMA_SELECIONADO\" = 'pt_BR.UTF-8' ] && [ -x /etc/rc.d/rc.ntpd ]; then
+        if [ -f /etc/ntp.conf ]; then
+            sed -i -E '/^[[:space:]]*(server|pool)[[:space:]]/d' /etc/ntp.conf
+            printf '%s\n' \
+                'server a.st1.ntp.br iburst nts' \
+                'server b.st1.ntp.br iburst nts' \
+                'server c.st1.ntp.br iburst nts' \
+                'server d.st1.ntp.br iburst nts' \
+                'server e.st1.ntp.br iburst nts' \
+                'server gps.nu.ntp.br iburst nts' \
+                'server gps.jd.ntp.br iburst nts' \
+                'server gps.ce.ntp.br iburst nts' >> /etc/ntp.conf
+        fi
+        ntpd -gq || echo 'NTP synchronization skipped.'
+        if grep -qi localtime /etc/hardwareclock 2>/dev/null; then
+            hwclock --systohc --localtime || true
+        else
+            hwclock --systohc --utc || true
+        fi
+    fi
 
     xwmconfig || true
     sed -i 's/id:3:initdefault:/id:$RUNLEVEL_DEFAULT:initdefault:/' /etc/inittab

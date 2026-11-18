@@ -1,0 +1,164 @@
+#!/bin/bash
+set -e
+
+[ "$(id -u)" -eq 0 ] || { echo "Execute como root."; exit 1; }
+
+VERSION="15.0" # 16.0 - current
+
+LOC="pt_BR.UTF-8"
+LANG_STR="pt_BR:pt:en"
+XKB_MODEL="abnt2"
+XKB_LAYOUT="br"
+
+KEYMAP="$XKB_LAYOUT-$XKB_MODEL"
+MIRRORS="/etc/slackpkg/mirrors"
+BLACKLIST="/etc/slackpkg/blacklist"
+
+sed -i 's|^PATH=.*|PATH="/usr/local/bin:/usr/bin:/bin:/usr/games:/sbin:/usr/sbin:$HOME/.local/bin"|' /etc/profile
+
+if [ -f /etc/profile.d/lang.sh ]; then
+    sed -i '/^[[:space:]]*#\?export[[:space:]]\+\(LANG\|LANGUAGE\|LC_\)/d' /etc/profile.d/lang.sh
+fi
+
+cat << EOF >> /etc/profile.d/lang.sh
+export LANG=$LOC
+export LANGUAGE=$LANG_STR
+export LC_ADDRESS=$LOC
+export LC_COLLATE=C
+export LC_CTYPE=$LOC
+export LC_IDENTIFICATION=$LOC
+export LC_MEASUREMENT=$LOC
+export LC_MESSAGES=$LOC
+export LC_MONETARY=$LOC
+export LC_NAME=$LOC
+export LC_NUMERIC=$LOC
+export LC_PAPER=$LOC
+export LC_TELEPHONE=$LOC
+export LC_TIME=$LOC
+EOF
+chmod +x /etc/profile.d/lang.sh
+
+if [ -f /etc/profile.d/lang.csh ]; then
+    sed -i '/^[[:space:]]*#\?setenv[[:space:]]\+\(LANG\|LANGUAGE\|LC_\)/d' /etc/profile.d/lang.csh
+fi
+
+cat << EOF >> /etc/profile.d/lang.csh
+setenv LANG $LOC
+setenv LANGUAGE $LANG_STR
+setenv LC_ADDRESS $LOC
+setenv LC_COLLATE C
+setenv LC_CTYPE $LOC
+setenv LC_IDENTIFICATION $LOC
+setenv LC_MEASUREMENT $LOC
+setenv LC_MESSAGES $LOC
+setenv LC_MONETARY $LOC
+setenv LC_NAME $LOC
+setenv LC_NUMERIC $LOC
+setenv LC_PAPER $LOC
+setenv LC_TELEPHONE $LOC
+setenv LC_TIME $LOC
+EOF
+chmod +x /etc/profile.d/lang.csh
+
+if grep -q 'setxkbmap' /etc/profile; then
+    sed -i "s|.*setxkbmap.*|[ -n \"\$DISPLAY\" ] \&\& setxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT|" /etc/profile
+else
+    echo -e "\n[ -n \"\$DISPLAY\" ] && setxkbmap -model $XKB_MODEL -layout $XKB_LAYOUT" >> /etc/profile
+fi
+
+if [ -f /etc/rc.d/rc.keymap ]; then
+    sed -i "s|^\([[:space:]]*\(/usr/bin/\)\?loadkeys\) .*|\1 $KEYMAP|" /etc/rc.d/rc.keymap
+else
+    cat << EOF > /etc/rc.d/rc.keymap
+#!/bin/sh
+if [ -x /usr/bin/loadkeys ]; then
+  /usr/bin/loadkeys $KEYMAP
+fi
+EOF
+fi
+
+chmod +x /etc/rc.d/rc.keymap
+/etc/rc.d/rc.keymap
+
+read -rp "Novo usuário [default: slackuser]: " NEW_USER
+NEW_USER="${NEW_USER:-slackuser}"
+
+if id "$NEW_USER" >/dev/null 2>&1; then
+    echo "Usuário '$NEW_USER' existe. Pulando o adduser..."
+else
+    adduser "$NEW_USER"
+fi
+
+usermod -aG wheel,audio,video,plugdev,netdev,cdrom,input,power,lp,scanner "$NEW_USER"
+id "$NEW_USER" | tr ' ' '\n'
+
+sed -i 's/^# *\(%wheel ALL=(ALL\(:ALL\)\?) ALL\)/\1/' /etc/sudoers
+sed -i 's/^# *\(Defaults.*secure_path=.*\)/\1/' /etc/sudoers
+visudo -c
+
+NET_CFG=$(
+    [ -f /etc/rc.d/rc.inet1.conf ] && . /etc/rc.d/rc.inet1.conf
+    VAL="${IPADDRS[*]}${IPADDR[*]}${USE_DHCP[*]}${IP6ADDRS[*]}${USE_DHCP6[*]}"
+    echo "${VAL//[[:space:]]/}"
+)
+
+if [ -z "$NET_CFG" ] && [ -f /etc/rc.d/rc.networkmanager ]; then
+    chmod +x /etc/rc.d/rc.networkmanager
+    pgrep -x NetworkManager >/dev/null || /etc/rc.d/rc.networkmanager start
+fi
+
+if [ -f /etc/ntp.conf ]; then
+    sed -i '/^[[:space:]]*\(server\|pool\)[[:space:]]/d' /etc/ntp.conf
+    cat << 'EOF' >> /etc/ntp.conf
+server a.st1.ntp.br iburst nts
+server b.st1.ntp.br iburst nts
+server c.st1.ntp.br iburst nts
+server d.st1.ntp.br iburst nts
+server e.st1.ntp.br iburst nts
+server gps.nu.ntp.br iburst nts
+server gps.jd.ntp.br iburst nts
+server gps.ce.ntp.br iburst nts
+EOF
+fi
+
+[ -x /etc/rc.d/rc.ntpd ] && /etc/rc.d/rc.ntpd stop 2>/dev/null || true
+ntpd -gq || true
+
+if grep -qi localtime /etc/hardwareclock 2>/dev/null; then
+    hwclock --systohc --localtime
+else
+    hwclock --systohc --utc
+fi
+
+if [ -f /etc/rc.d/rc.ntpd ]; then
+    chmod +x /etc/rc.d/rc.ntpd
+    /etc/rc.d/rc.ntpd restart
+fi
+
+sed -i 's/^id:[0-9]:initdefault:/id:4:initdefault:/' /etc/inittab
+sed -i '/^[^#[:space:]]/s/^/# /' "$MIRRORS"
+
+LINE=$(grep -n -m 1 -E "^#[[:space:]]*https://.*\.br/.*-${VERSION}/" "$MIRRORS" | cut -d: -f1 || true)
+if [ -z "$LINE" ]; then
+    LINE=$(grep -n -m 1 -E "^#[[:space:]]*http://.*\.br/.*-${VERSION}/" "$MIRRORS" | cut -d: -f1 || true)
+fi
+
+if [ -n "$LINE" ]; then
+    sed -i "${LINE}s/^#[[:space:]]*//" "$MIRRORS"
+fi
+
+sed -i 's/^#[[:space:]]*\(\[0-9\]+_SBo\)/\1/' "$BLACKLIST"
+sed -i 's/^#[[:space:]]*\(\[0-9\]+alien\)/\1/' "$BLACKLIST"
+grep -qxF '[0-9]+_SBo' "$BLACKLIST" || echo '[0-9]+_SBo' >> "$BLACKLIST"
+grep -qxF '[0-9]+alien' "$BLACKLIST" || echo '[0-9]+alien' >> "$BLACKLIST"
+
+read -rp "Deseja atualizar o sistema agora? [s/N]: " ATUALIZAR
+if [[ "${ATUALIZAR,,}" == "s" ]]; then
+    if slackpkg update gpg && slackpkg update && [ -s /var/lib/slackpkg/CHECKSUMS.md5 ]; then
+        slackpkg install-new
+        slackpkg upgrade-all
+        slackpkg new-config
+    else
+        echo "ERRO: 'slackpkg update' falhou. Atualização abortada."
+    fi
+fi
