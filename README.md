@@ -145,10 +145,18 @@ wget -c http://192.168.0.09:8080/btrfs-uefi
 
 * `auto-chroot-btrfs` - Auto chroot automático para rodar no modo LiveCD ou ambiente de
   instalação para montar e acessar facilmente sistemas instalados em Btrfs com subvolume.
-* `btrfs-uefi-setup` - Setup custom para particionamento GPT, UEFI, formatação em Btrfs
-  com subvolumes `@` e `@home`, `fstab` otimizado, configuração de idioma, criação de
-  usuário, ativação do sudo, inittab runlevel 4 e demais configurações.
+* `btrfs-uefi-setup` - Setup custom para tabela de partição GPT, partição UEFI,
+  formatação em Btrfs com subvolumes `@` e `@home`, swap ou swapfile opcional, `fstab`
+  otimizado, subvolume `@tmp` ou `/tmp` na RAM opcional, configuração de idioma, teclado,
+  variável PATH, serviço NTP apenas para pt_BR, criação de usuário com grupos adicionais,
+  ativação do sudo, initdefault runlevel 4, geração de initrd para Btrfs, instalação do
+  `GRUB` com e demais configurações.
 * `f2fs-format` - Automatiza a formatação F2FS em discos ou partições, com flags modernas
   de integridade e adição de entrada no `fstab` existente (suporte a Live/Chroot).
 * `pkg-clean` - Automatiza a limpeza de pacotes por categorias, principalmente os jogos
   do **`KDE GAMES`** que eu nem sei se tem alguém que joga.
+* `pos-config-ptbr` - Pós-configuração convencional em português pra quem instalou o
+  Slackware pelo setup padrão. Inclui idioma, teclado, `PATH`, ativação sudo, criação de
+  usuário e adição de grupos adicionais, ativação do NetworkManager se necessário,
+  serviço NTP para o fuso-horário, inittab runlevel 4 e configuração do SlackPkg
+  e atualização do sistema.
