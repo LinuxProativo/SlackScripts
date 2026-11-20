@@ -153,6 +153,8 @@ wget -c http://192.168.0.09:8080/btrfs-uefi
   `GRUB` com e demais configurações.
 * `f2fs-format` - Automatiza a formatação F2FS em discos ou partições, com flags modernas
   de integridade e adição de entrada no `fstab` existente (suporte a Live/Chroot).
+* `install-pkgs-alien` - Instala alguns pacotes do repositório `alien` para o Slackware
+  e esse pode ser ajustado para adicionar pacotes conforme a necessidade.
 * `pkg-clean` - Automatiza a limpeza de pacotes por categorias, principalmente os jogos
   do **`KDE GAMES`** que eu nem sei se tem alguém que joga.
 * `pos-config-ptbr` - Pós-configuração convencional em português pra quem instalou o

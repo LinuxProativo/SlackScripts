@@ -1,0 +1,100 @@
+#!/bin/bash
+
+[ $UID != 0 ] && echo "Run as Root !" && exit 1
+
+packages="docker flatpak libreoffice libreoffice-dict-pt-BR libreoffice-l10n-pt_BR"
+restricted="ffmpeg vlc"
+
+dir1="/tmp/alien"
+dir2="/tmp/restricted"
+file="FILELIST.TXT"
+
+mkdir -p "$dir1" "$dir2"
+
+: "$(grep "VERSION_ID" /etc/os-release)"; slackver="${_#*=}"
+
+case "$(uname -m)" in
+    i?86) export ARCH=i586 ;;
+    arm*) export ARCH=arm  ;;
+       *) export ARCH=$(uname -m) ;;
+esac
+
+link0="http://www.slackware.com/~alien/slackbuilds"
+link1="https://slackware.nl/people/alien/restricted_slackbuilds"
+
+cd "/var/log/packages"
+lst=$(printf "%s\n" *)
+cd - > /dev/null
+
+function down
+{
+    cd $3
+
+    [ ! -e "$file" ] && {
+        echo "Baixando FILELIST.TXT"
+        wget -c -q --show-progress "$1/$file"
+    } || {
+        printf "Verificando FILELIST.TXT existente..."
+
+        sam0="$(grep -E "$file" <(links -dump "$1/CHECKSUMS.md5"))"
+        sam1="$(md5sum "$file")"
+
+        [ ${sam0%[ ]*} != ${sam1%[ ]*} ] && {
+
+            echo "\nBaixando novo FILELIST.TXT"
+
+            rm "$file"
+            wget -c -q --show-progress "$1/$file"
+            true
+        } || echo "OK"
+    }
+
+    pkgs=$2
+    loop=0
+    echo "Baixando lista de pacotes: $pkgs"
+
+    while [ $loop == 0 ]; do
+
+        loop=1
+        intermediario=""
+
+        for prg in $pkgs
+        {
+
+            pkg="$(grep -Eom1 "pkg[0-9]*[/]$slackver[/]$prg[-]([0-9]+[.])+[0-9]+[-]([aA-zZ]*[0-9]*[_]*)+$ARCH[-][0-9]+alien" "$file")"
+
+            echo "- pacote: $pkg"
+
+            test -n "$(grep -Eo "$pkg.dep" "$file")" && {
+
+                [ ! -e "${pkg##*[/]}.dep" ] && wget -c -q --show-progress "$1/$prg/$pkg.dep"
+
+                [ -e "${pkg##*[/]}.dep" ] && {
+
+                    loop=0
+                    intermediario="$intermediario $(< "${pkg##*[/]}.dep") "
+
+                    echo -e "--- dependências: ${intermediario//$'\n'/ }"
+
+                } || continue
+            }
+
+            test -n "$(grep -Eo "${pkg##*[/]}" <<< "$lst")" && continue
+
+            wget -c -q --show-progress "$1/$(grep -Eom1 $prg/$pkg[.]t[a-z]z "$file")"
+
+            [ -e ${pkg##*[/]}.t?z ] && {
+                echo "- instalando ${pkg##*[/]}"
+                /sbin/upgradepkg --terse --install-new ${pkg##*[/]}.t?z
+            }
+        }
+
+        [ $loop == 0 ] && pkgs="$intermediario"
+
+    done
+}
+
+down "$link0" "$packages" "$dir1"
+down "$link1" "$restricted" "$dir2"
+
+exit 0
